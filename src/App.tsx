@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppModal } from "./components/AppModal";
 import { RecipePicker } from "./components/RecipePicker";
 import { SettingsModal } from "./components/SettingsModal";
-import { showServiceMenu } from "./components/serviceMenu";
+import { showNotificationMenu, showServiceMenu } from "./components/serviceMenu";
 import { Sidebar } from "./components/Sidebar";
 import {
   activateService,
@@ -167,6 +167,18 @@ export default function App() {
       position,
     ).catch((e) => setError(toError(e)));
 
+  // The bell's switches save like any setting; a failure shows in the bar.
+  const openNotificationMenu = (anchor: DOMRect) => {
+    if (!settings) return;
+    const toggle = (change: Partial<Settings>) => void run(changeSettings({ ...settings, ...change }));
+    void showNotificationMenu(
+      settings,
+      anchor,
+      { setNotifications: (notifications) => toggle({ notifications }), setAudio: (audio) => toggle({ audio }) },
+      position,
+    ).catch((e) => setError(toError(e)));
+  };
+
   return (
     <>
       {/* Not before the settings: Rust may have already put the bar on another edge. */}
@@ -191,6 +203,9 @@ export default function App() {
             )
           }
           onAdd={() => openModal("new")}
+          notifications={settings?.notifications ?? true}
+          audio={settings?.audio ?? true}
+          onNotificationMenu={openNotificationMenu}
           onSettings={() => openModal("settings")}
         />
       )}

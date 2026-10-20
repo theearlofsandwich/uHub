@@ -20,6 +20,11 @@ interface Props {
   onReorder: (ids: string[]) => Promise<void>;
   /** Open the "Add app" modal. */
   onAdd: () => void;
+  /** The app-wide switches the bell shows. */
+  notifications: boolean;
+  audio: boolean;
+  /** Open the bell's menu; `anchor` is the bell. */
+  onNotificationMenu: (anchor: DOMRect) => void;
   /** Open the settings modal. */
   onSettings: () => void;
 }
@@ -57,6 +62,9 @@ export function Sidebar({
   onMenu,
   onReorder,
   onAdd,
+  notifications,
+  audio,
+  onNotificationMenu,
   onSettings,
 }: Props) {
   const horizontal = position === "top" || position === "bottom";
@@ -190,6 +198,22 @@ export function Sidebar({
             <span className="service-icon">!</span>
           </button>
         )}
+        <button
+          className="service"
+          onClick={(e) => onNotificationMenu(e.currentTarget.getBoundingClientRect())}
+          title={`Notifications ${notifications ? "on" : "off"}, sound ${audio ? "on" : "off"}`}
+          aria-label={showLabels ? undefined : "Notifications and sound"}
+        >
+          <span className="service-icon plain">
+            <BellIcon off={!notifications} />
+            {!audio && (
+              <span className="muted" role="img" aria-label="Sound off">
+                <SpeakerIcon off />
+              </span>
+            )}
+          </span>
+          {showLabels && <span className="name">Notifications</span>}
+        </button>
         <button className="service" onClick={onSettings} title="Settings" aria-label={showLabels ? undefined : "Settings"}>
           <span className="service-icon plain">
             <GearIcon />
@@ -201,13 +225,30 @@ export function Sidebar({
   );
 }
 
-/** A speaker with sound waves, sized by the surrounding font. */
-function SpeakerIcon() {
+/** A speaker with sound waves, or crossed out if `off`, sized by the surrounding font. */
+function SpeakerIcon({ off = false }: { off?: boolean }) {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true">
       <path d="M2 6h2.5L8 3v10L4.5 10H2z" />
-      <path d="M10.5 5.5a3.5 3.5 0 0 1 0 5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <path d="M12.3 3.7a6 6 0 0 1 0 8.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      {off ? (
+        <path d="M10.5 6l4 4m0-4l-4 4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      ) : (
+        <>
+          <path d="M10.5 5.5a3.5 3.5 0 0 1 0 5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          <path d="M12.3 3.7a6 6 0 0 1 0 8.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/** A bell, struck through if `off`, sized by the surrounding font. */
+function BellIcon({ off }: { off: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+      <path strokeLinejoin="round" d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1.2 1H2.8z" />
+      <path strokeLinecap="round" d="M6.6 14a1.5 1.5 0 0 0 2.8 0" />
+      {off && <path strokeLinecap="round" d="M2 2l12 12" />}
     </svg>
   );
 }

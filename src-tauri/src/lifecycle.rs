@@ -116,6 +116,11 @@ impl<H> Registry<H> {
         self.handles.get(id)
     }
 
+    /// Every webview there is, crashed ones included, by service id.
+    pub fn handles(&self) -> impl Iterator<Item = (&str, &H)> {
+        self.handles.iter().map(|(id, h)| (id.as_str(), h))
+    }
+
     /// The service on screen, crashed or not.
     pub fn active_id(&self) -> Option<&str> {
         self.active.as_deref()

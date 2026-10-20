@@ -74,6 +74,7 @@ struct Inner {
 impl Services {
     pub fn load(config_path: PathBuf) -> Result<Self> {
         let config = Config::load(config_path)?;
+        AUDIO.store(config.settings().audio, Ordering::Relaxed);
         Ok(Self(Mutex::new(Inner { reg: Registry::default(), config })))
     }
 
@@ -104,6 +105,14 @@ pub struct SvcWebview<R: Runtime = Wry> {
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Mirror of `Settings::audio` for `create`, which only gets the service.
+static AUDIO: AtomicBool = AtomicBool::new(true);
+
+/// Whether `svc`'s webview is muted: by its own setting or the app-wide one.
+fn muted(svc: &Service) -> bool {
+    !(svc.instance.audio && AUDIO.load(Ordering::Relaxed))
+}
 
 fn label(id: &str) -> String {
     format!("svc-{id}")
@@ -172,7 +181,8 @@ fn on_playing_audio<R: Runtime>(app: &AppHandle<R>, id: String, generation: u64,
 }
 
 /// Main thread (web notification): only the strings leave it. The current
-/// service name (it may have been renamed) is looked up off the main thread.
+/// service name (it may have been renamed) is looked up off the main thread,
+/// as is the app-wide switch, which drops it.
 fn on_show_notification<R: Runtime>(app: &AppHandle<R>, id: String, title: String, body: String) {
     log::info!("[{id}] notification: {title:?}");
     let app = app.clone();
@@ -180,6 +190,10 @@ fn on_show_notification<R: Runtime>(app: &AppHandle<R>, id: String, title: Strin
         let name = {
             let state = app.state::<Services>();
             let inner = state.0.lock().await;
+            if !inner.config.settings().notifications {
+                log::debug!("[{id}] notification dropped: notifications are off app-wide");
+                return;
+            }
             match inner.config.find(&id) {
                 Some(svc) => svc.instance.name.clone(),
                 None => return,
@@ -317,7 +331,7 @@ fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>
         .add_child(builder, LogicalPosition::new(0., 0.), LogicalSize::new(1., 1.))
         .map_err(|e| Error::CreateFailed(format!("add_child failed: {e}")))?;
     // From here on the label is taken: don't leak the webview on failure.
-    if let Err(e) = platform::attach_service(&webview, events.clone(), !svc.instance.audio) {
+    if let Err(e) = platform::attach_service(&webview, events.clone(), muted(svc)) {
         log::error!("[{id}] placing webview failed, closing it: {e}");
         if let Err(e) = webview.close() {
             log::error!("[{id}] close failed: {e}");
@@ -691,9 +705,9 @@ pub async fn set_audio(app: AppHandle, state: State<'_, Services>, id: String, a
     let mut inner = state.0.lock().await;
     inner.config.set_audio(&id, audio)?;
     emit_snapshot(&app, &inner);
-    match inner.reg.handle(&id) {
-        Some(wv) => Ok(platform::set_muted(&wv.webview, !audio)?),
-        None => Ok(()),
+    match (inner.reg.handle(&id), inner.config.find(&id)) {
+        (Some(wv), Some(svc)) => Ok(platform::set_muted(&wv.webview, muted(svc))?),
+        _ => Ok(()),
     }
 }
 
@@ -749,7 +763,7 @@ fn refresh(app: &AppHandle, inner: &mut Inner, old: &Service) -> Result<()> {
     }
     if rebuilt(old) == rebuilt(&new) {
         wv.events.notifications.store(new.allows(PermissionKind::Notifications), Ordering::Relaxed);
-        return Ok(platform::set_muted(&wv.webview, !new.instance.audio)?);
+        return Ok(platform::set_muted(&wv.webview, muted(&new))?);
     }
     let was_active = inner.reg.state(id) == Lifecycle::Active;
     log::info!("[{id}] recreating webview for the new settings");
@@ -777,6 +791,13 @@ pub async fn set_settings(
     inner.config.set_settings(settings)?;
     let settings = inner.config.settings();
     tray::set_close_to_tray(&app, settings.close_to_tray);
+    if AUDIO.swap(settings.audio, Ordering::Relaxed) != settings.audio {
+        for (id, wv) in inner.reg.handles() {
+            if let Some(svc) = inner.config.find(id) {
+                platform::set_muted(&wv.webview, muted(svc))?;
+            }
+        }
+    }
     if settings.theme_color != old_color {
         platform::set_title_bar_color(&app, &settings.theme_color)?;
     }

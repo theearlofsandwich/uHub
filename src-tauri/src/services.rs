@@ -518,6 +518,14 @@ pub struct Settings {
     /// selected app, buttons, switches).
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
+    /// Desktop notifications from any service; `false` drops them all, whatever
+    /// each service's own setting (the bar's bell).
+    #[serde(default = "yes")]
+    pub notifications: bool,
+    /// Sound from any service; `false` mutes every webview, whatever each
+    /// service's own setting (the bar's bell).
+    #[serde(default = "yes")]
+    pub audio: bool,
 }
 
 /// Largest `Settings::icon_spacing`; the shell's slider stops here too.
@@ -593,6 +601,8 @@ impl Default for Settings {
             icon_size: IconSize::default(),
             icon_spacing: default_icon_spacing(),
             theme_color: default_theme_color(),
+            notifications: true,
+            audio: true,
         }
     }
 }
@@ -1492,6 +1502,8 @@ mod tests {
             icon_size: IconSize::Large,
             icon_spacing: 8,
             theme_color: "#22c55e".to_owned(),
+            notifications: false,
+            audio: false,
         };
         c.set_settings(s.clone()).unwrap();
         assert!(c.set_settings(Settings { max_suspended: Some(1000), ..s.clone() }).is_err());

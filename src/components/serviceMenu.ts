@@ -1,7 +1,7 @@
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { BarPosition, Service } from "../services/types";
+import type { BarPosition, Service, Settings } from "../services/types";
 
 export interface ServiceMenuActions {
   home: () => void;
@@ -27,7 +27,6 @@ export async function showServiceMenu(
   actions: ServiceMenuActions,
   position: BarPosition,
 ) {
-  for (const r of shown) void r.close();
   // Only a loaded page can be sent home or reloaded.
   const loaded = s.state === "active" || s.state === "suspended";
   const items = await Promise.all([
@@ -44,6 +43,35 @@ export async function showServiceMenu(
     PredefinedMenuItem.new({ item: "Separator" }),
     MenuItem.new({ text: "Edit app", action: () => actions.edit() }),
   ]);
+  await popup(items, anchor, position);
+}
+
+export interface NotificationMenuActions {
+  setNotifications: (notifications: boolean) => void;
+  setAudio: (audio: boolean) => void;
+}
+
+/** The bell's menu: the app-wide switches, over each service's own. Placed like `showServiceMenu`. */
+export async function showNotificationMenu(
+  settings: Pick<Settings, "notifications" | "audio">,
+  anchor: DOMRect,
+  actions: NotificationMenuActions,
+  position: BarPosition,
+) {
+  const items = await Promise.all([
+    CheckMenuItem.new({
+      text: "Enable notifications",
+      checked: settings.notifications,
+      action: () => actions.setNotifications(!settings.notifications),
+    }),
+    CheckMenuItem.new({ text: "Enable sound", checked: settings.audio, action: () => actions.setAudio(!settings.audio) }),
+  ]);
+  await popup(items, anchor, position);
+}
+
+/** Drop a menu of `items` down from `anchor`, freeing the last one shown. */
+async function popup(items: (MenuItem | CheckMenuItem | PredefinedMenuItem)[], anchor: DOMRect, position: BarPosition) {
+  for (const r of shown) void r.close();
   const menu = await Menu.new({ items });
   shown = [menu, ...items];
   // The shell's coordinates are the window's, except that a right or bottom

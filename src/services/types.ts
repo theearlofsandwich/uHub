@@ -86,6 +86,10 @@ export interface Settings {
   icon_spacing: number;
   /** `#rrggbb`: the window's title bar and the shell's accents. */
   theme_color: string;
+  /** Off: no service shows desktop notifications, whatever its own setting. */
+  notifications: boolean;
+  /** Off: every service is muted, whatever its own setting. */
+  audio: boolean;
 }
 
 export type BarPosition = "left" | "top" | "bottom" | "right";

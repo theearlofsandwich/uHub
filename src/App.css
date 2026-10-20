@@ -71,6 +71,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .service-icon img { width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
 .service-icon.plain { background: transparent; color: var(--muted); font-size: calc(var(--icon-size) * .75); }
 .service:hover .service-icon.plain { color: #e6e8ee; }
+/* The bell's "sound off" mark, on its bottom-right corner. */
+.service-icon .muted {
+  position: absolute; right: -3px; bottom: -3px; display: flex; padding: 1px; border-radius: 50%;
+  background: var(--bar-bg); color: #ff8a8f; font-size: calc(var(--icon-size) * .4);
+}
 .service.error .service-icon { background: #5c2328; color: #ff8a8f; }
 .service-icon .dot { position: absolute; right: -2px; bottom: -2px; box-shadow: 0 0 0 2px var(--bar-bg); }
 .service.selected .service-icon .dot { box-shadow: 0 0 0 2px var(--accent); }
