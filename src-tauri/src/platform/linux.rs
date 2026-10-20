@@ -4,6 +4,7 @@ mod layout;
 
 use super::{text_on, ServiceEvents};
 use crate::services::PermissionKind;
+use crate::shortcuts::{Key, Mods};
 use gtk::prelude::*;
 use std::{
     cell::{OnceCell, RefCell},
@@ -92,6 +93,40 @@ pub fn set_title_bar_color<R: Runtime>(app: &AppHandle<R>, color: &str) -> tauri
             }
         })
     })
+}
+
+/// The window's `key-press-event` runs before the focused webview sees the
+/// key; `handle` returning `true` keeps it from the page.
+pub fn watch_keys<R: Runtime>(window: &Window<R>, handle: impl Fn(Key, Mods) -> bool + 'static) -> tauri::Result<()> {
+    use gtk::gdk::{keys::constants as keys, ModifierType};
+    window.gtk_window()?.connect_key_press_event(move |_, event| {
+        let state = event.state();
+        if state.intersects(ModifierType::SUPER_MASK | ModifierType::HYPER_MASK | ModifierType::META_MASK) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        let mods = Mods {
+            ctrl: state.contains(ModifierType::CONTROL_MASK),
+            shift: state.contains(ModifierType::SHIFT_MASK),
+            alt: state.contains(ModifierType::MOD1_MASK),
+        };
+        let keyval = event.keyval();
+        let key = match keyval {
+            // Shift+Tab arrives as ISO_Left_Tab.
+            keys::Tab | keys::ISO_Left_Tab => Key::Tab,
+            keys::Page_Up | keys::KP_Page_Up => Key::PageUp,
+            keys::Page_Down | keys::KP_Page_Down => Key::PageDown,
+            keys::Left | keys::KP_Left => Key::Left,
+            keys::Right | keys::KP_Right => Key::Right,
+            keys::Home | keys::KP_Home => Key::Home,
+            keys::F5 => Key::F5,
+            _ => match keyval.to_lower().to_unicode() {
+                Some(c) => Key::Char(c),
+                None => return gtk::glib::Propagation::Proceed,
+            },
+        };
+        if handle(key, mods) { gtk::glib::Propagation::Stop } else { gtk::glib::Propagation::Proceed }
+    });
+    Ok(())
 }
 
 /// GTK sizes the webviews (see layout.rs).

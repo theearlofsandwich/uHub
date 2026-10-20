@@ -7,6 +7,7 @@
 
 use super::{bar, BarPosition, ServiceEvents};
 use crate::services::PermissionKind;
+use crate::shortcuts::{Key, Mods};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -109,6 +110,12 @@ pub fn relayout<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
 
 /// Not implemented here yet (see mod.rs): the title bar keeps the system's colour.
 pub fn set_title_bar_color<R: Runtime>(_app: &AppHandle<R>, _color: &str) -> tauri::Result<()> {
+    Ok(())
+}
+
+/// Not hooked up yet (see mod.rs).
+pub fn watch_keys<R: Runtime>(_window: &Window<R>, _handle: impl Fn(Key, Mods) -> bool + 'static) -> tauri::Result<()> {
+    log::info!("keyboard shortcuts are only supported on Linux so far");
     Ok(())
 }
 

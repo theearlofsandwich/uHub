@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type SyntheticEvent } from "react";
+import { getAutostart, setAutostart } from "../services/api";
 import type { BarPosition, IconSize, Settings } from "../services/types";
 import { Section, Switch } from "./AppModal";
 
@@ -40,6 +41,19 @@ const swatches: { value: string; label: string }[] = [
   { value: "#64748b", label: "Slate" },
 ];
 
+/** Mirrors the table in src-tauri/src/shortcuts.rs; each entry's alternatives do the same. */
+const SHORTCUTS: { label: string; keys: string[] }[] = [
+  { label: "Switch to app 1–8", keys: ["Ctrl+1…8"] },
+  { label: "Switch to the last app", keys: ["Ctrl+9"] },
+  { label: "Next app", keys: ["Ctrl+Tab", "Ctrl+PgDn"] },
+  { label: "Previous app", keys: ["Ctrl+Shift+Tab", "Ctrl+PgUp"] },
+  { label: "Reload", keys: ["Ctrl+R", "F5"] },
+  { label: "Back / forward", keys: ["Alt+←", "Alt+→"] },
+  { label: "Go to home", keys: ["Alt+Home"] },
+  { label: "Settings", keys: ["Ctrl+,"] },
+  { label: "Quit", keys: ["Ctrl+Q"] },
+];
+
 /** How long the colour input must rest, in ms, before its colour is saved. */
 const COLOR_SAVE_DELAY = 250;
 
@@ -47,6 +61,8 @@ const COLOR_SAVE_DELAY = 250;
 export function SettingsModal({ settings, onPreview, onChange, onClose }: Props) {
   const titleId = useId();
   const [error, setError] = useState<string | null>(null);
+  /** Kept by the OS rather than in `settings`; null until read (or if it can't be). */
+  const [autostart, setAutostartState] = useState<boolean | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -54,14 +70,28 @@ export function SettingsModal({ settings, onPreview, onChange, onClose }: Props)
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const showError = (e: unknown) => setError(String((e as { message?: unknown })?.message ?? e));
+
+  useEffect(() => {
+    getAutostart().then(setAutostartState, showError);
+  }, []);
+
+  const toggleAutostart = (enabled: boolean) => {
+    setAutostartState(enabled);
+    setAutostart(enabled).then(
+      () => setError(null),
+      (e) => {
+        setAutostartState(!enabled);
+        showError(e);
+      },
+    );
+  };
+
   const set =
     <K extends keyof Settings>(key: K) =>
     (value: Settings[K]) => {
       if (!settings) return;
-      onChange({ ...settings, [key]: value }).then(
-        () => setError(null),
-        (e) => setError(String((e as { message?: unknown })?.message ?? e)),
-      );
+      onChange({ ...settings, [key]: value }).then(() => setError(null), showError);
     };
 
   // A slider previews while it moves and saves once it's let go (pointer
@@ -100,6 +130,17 @@ export function SettingsModal({ settings, onPreview, onChange, onClose }: Props)
         <div className="modal-body">
           {settings ? (
             <>
+              <Section title="General">
+                <Switch
+                  label="Close button closes to tray"
+                  hint={settings.close_to_tray ? "uHub keeps running in the tray" : "Closing the window quits uHub"}
+                  checked={settings.close_to_tray}
+                  onChange={set("close_to_tray")}
+                />
+                {autostart !== null && (
+                  <Switch label="Enable autostart on login" checked={autostart} onChange={toggleAutostart} />
+                )}
+              </Section>
               <Section title="App bar">
                 <label className="row-field">
                   <span>
@@ -181,6 +222,18 @@ export function SettingsModal({ settings, onPreview, onChange, onClose }: Props)
                     />
                   </span>
                 </div>
+              </Section>
+              <Section title="Keyboard shortcuts">
+                {SHORTCUTS.map((s) => (
+                  <div key={s.label} className="row-field">
+                    <span>{s.label}</span>
+                    <span className="shortcut-keys">
+                      {s.keys.map((k) => (
+                        <kbd key={k}>{k}</kbd>
+                      ))}
+                    </span>
+                  </div>
+                ))}
               </Section>
             </>
           ) : (

@@ -17,8 +17,9 @@
 //! switch so it can't race one.
 //!
 //! Also hosts the commands that edit the service configuration and settings
-//! (services.rs), the ones behind the shell's "Add app" and "Edit app" modals,
-//! and those of a service's context menu (go home, reload).
+//! (services.rs) and whether uHub starts at login, the ones behind the shell's "Add app" and "Edit app" modals,
+//! and those of a service's context menu (go home, reload). Keyboard
+//! shortcuts (shortcuts.rs) end up here too, in `on_shortcut`.
 //!
 //! Every change is pushed to the shell as a "services-changed" event carrying
 //! the full snapshot, emitted while the registry lock is held so events arrive
@@ -31,6 +32,7 @@ use crate::{
     navigation,
     platform::{self, ServiceEvents},
     services::{self, Config, Lifecycle, NewService, PermissionKind, RecipeInfo, Service, ServiceInfo, Settings},
+    shortcuts::{self, Shortcut},
     tray,
 };
 use std::{
@@ -47,9 +49,12 @@ use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Runtime, State, Url, Webview,
     WebviewUrl, Wry,
 };
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_notification::NotificationExt;
 
 pub const SERVICES_CHANGED: &str = "services-changed";
+/// Sent to the shell for a shortcut it carries out; the payload names it ("settings").
+pub const SHORTCUT: &str = "shortcut";
 /// Key of the desktop notification's `extra` payload naming the service it came from.
 const NOTIFICATION_SERVICE: &str = "service";
 
@@ -579,6 +584,7 @@ pub async fn inspect_site(url: String) -> Result<SiteInfo> {
 #[tauri::command]
 pub async fn set_overlay(app: AppHandle, open: bool) -> Result<()> {
     let shell = app.get_webview("shell").ok_or(Error::WebviewMissing)?;
+    shortcuts::set_paused(open);
     Ok(platform::set_overlay(&shell, open)?)
 }
 
@@ -783,6 +789,64 @@ pub async fn set_settings(
         emit_snapshot(&app, inner);
     }
     Ok(())
+}
+
+/// Carry out a keyboard shortcut. Called on the main thread, so the work is
+/// handed off (see `on_web_process_terminated`).
+pub fn on_shortcut(app: &AppHandle, shortcut: Shortcut) {
+    log::debug!("shortcut {shortcut:?}");
+    match shortcut {
+        Shortcut::Quit => return app.exit(0),
+        Shortcut::Settings => {
+            if let Err(e) = app.emit_to(EventTarget::webview("shell"), SHORTCUT, "settings") {
+                log::error!("emitting {SHORTCUT} failed: {e}");
+            }
+            return;
+        }
+        _ => {}
+    }
+    let app = app.clone();
+    async_runtime::spawn(async move {
+        if let Err(e) = run_shortcut(&app, shortcut).await {
+            log::warn!("shortcut {shortcut:?} failed: {e}");
+        }
+    });
+}
+
+async fn run_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<()> {
+    let state = app.state::<Services>();
+    let inner = state.0.lock().await;
+    let current = inner.reg.active_id().map(str::to_owned);
+    let crashed = current.as_deref().is_some_and(|id| inner.reg.state(id) == Lifecycle::Crashed);
+    let apps: Vec<_> = inner.config.services().iter().map(|s| (s.id(), s.instance.enabled)).collect();
+    let to = shortcuts::target(shortcut, &apps, current.as_deref()).map(str::to_owned);
+    drop(inner);
+    if let Some(id) = to {
+        return activate(app, &id).await;
+    }
+    let Some(current) = current else { return Ok(()) };
+    match shortcut {
+        // A crashed page can't reload; activating it again recreates it.
+        Shortcut::Reload if crashed => activate(app, &current).await,
+        Shortcut::Reload => reload_service(state, current).await,
+        Shortcut::Back => with_page(state, &current, |webview, _| Ok(webview.eval("history.back()")?)).await,
+        Shortcut::Forward => with_page(state, &current, |webview, _| Ok(webview.eval("history.forward()")?)).await,
+        Shortcut::Home => go_home(state, current).await,
+        _ => Ok(()),
+    }
+}
+
+/// Whether uHub starts at login. The OS's login item is the source of truth,
+/// not `Settings`, so removing it by hand shows here.
+#[tauri::command]
+pub async fn get_autostart(app: AppHandle) -> Result<bool> {
+    app.autolaunch().is_enabled().map_err(|e| Error::Autostart(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn set_autostart(app: AppHandle, enabled: bool) -> Result<()> {
+    let autolaunch = app.autolaunch();
+    if enabled { autolaunch.enable() } else { autolaunch.disable() }.map_err(|e| Error::Autostart(e.to_string()))
 }
 
 #[tauri::command]

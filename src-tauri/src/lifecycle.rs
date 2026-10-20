@@ -116,6 +116,11 @@ impl<H> Registry<H> {
         self.handles.get(id)
     }
 
+    /// The service on screen, crashed or not.
+    pub fn active_id(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+
     pub fn active_handle(&self) -> Option<&H> {
         self.active.as_ref().and_then(|id| self.handles.get(id))
     }

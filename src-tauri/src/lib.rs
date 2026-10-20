@@ -6,10 +6,12 @@ mod navigation;
 mod platform;
 mod plugins;
 mod services;
+mod shortcuts;
 mod tray;
 mod webviews;
 
 use tauri::{webview::WebviewBuilder, window::WindowBuilder, LogicalPosition, LogicalSize, Manager, WebviewUrl};
+use tauri_plugin_window_state::StateFlags;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,7 +19,21 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // First, so a second launch exits before touching services.json or
+        // the webview profiles; it brings up the running instance instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_window(app)))
+        // The main window's size, position and maximized state. Not whether
+        // it is visible: quitting from the tray while hidden must not start
+        // the next run hidden.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+                .with_filter(|label| label == "main")
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
+        // Used from Rust only (get_autostart/set_autostart), like notifications.
+        .plugin(plugins::without_init_script(tauri_plugin_autostart::Builder::new().build()))
         // Used from Rust only (webviews.rs); no capability grants it to any webview.
         .plugin(plugins::without_init_script(tauri_plugin_notification::init()))
         .invoke_handler(tauri::generate_handler![
@@ -40,6 +56,8 @@ pub fn run() {
             webviews::reload_service,
             webviews::get_settings,
             webviews::set_settings,
+            webviews::get_autostart,
+            webviews::set_autostart,
             webviews::open_devtools,
         ])
         .on_window_event(|window, event| {
@@ -60,11 +78,14 @@ pub fn run() {
                 log::error!("tray unavailable: {e}");
             }
 
+            // The default size; tauri_plugin_window_state restores the last one.
             let window = WindowBuilder::new(app, "main")
                 .title("uHub")
                 .inner_size(1280., 800.)
                 .min_inner_size(640., 400.)
                 .build()?;
+            let handle = app.handle().clone();
+            platform::watch_shortcuts(&window, move |shortcut| webviews::on_shortcut(&handle, shortcut))?;
 
             // The trusted React shell: the only webview that gets IPC (see capabilities/default.json).
             // Transparent, so a service shows through while the shell covers it

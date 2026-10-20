@@ -22,6 +22,9 @@ pub enum Error {
     /// Loading something from the web failed (see favicon.rs).
     #[error("{0}")]
     Fetch(String),
+    /// Registering uHub to start at login, or removing it, failed.
+    #[error("autostart: {0}")]
+    Autostart(String),
     #[error("{context}: {source}")]
     Io { context: String, source: io::Error },
     #[error(transparent)]
@@ -48,6 +51,7 @@ impl Error {
             Self::CreateFailed(_) => "createFailed",
             Self::InvalidConfig(_) => "invalidConfig",
             Self::Fetch(_) => "fetch",
+            Self::Autostart(_) => "autostart",
             Self::Io { .. } => "io",
             Self::Tauri(_) => "tauri",
         }

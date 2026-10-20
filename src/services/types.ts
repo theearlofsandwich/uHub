@@ -69,7 +69,7 @@ export interface Settings {
   hibernate_after_minutes: number;
   /** At most this many background services (not counting kept-alive ones); null = no limit. */
   max_suspended: number | null;
-  /** Closing the window hides it to the tray instead of quitting. */
+  /** Closing the window hides it to the tray instead of quitting (if there is a tray). */
   close_to_tray: boolean;
   /** The window edge the app bar sits on. */
   bar_position: BarPosition;
@@ -102,6 +102,7 @@ export type ErrorKind =
   | "createFailed"
   | "invalidConfig"
   | "fetch"
+  | "autostart"
   | "io"
   | "tauri";
 

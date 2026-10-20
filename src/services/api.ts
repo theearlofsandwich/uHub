@@ -31,7 +31,13 @@ export const reorderServices = (ids: string[]) => invoke<void>("reorder_services
 export const setKeepAlive = (id: string, keepAlive: boolean) => invoke<void>("set_keep_alive", { id, keepAlive });
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
+/** Whether uHub starts at login; kept by the OS, not in `Settings`. */
+export const getAutostart = () => invoke<boolean>("get_autostart");
+export const setAutostart = (enabled: boolean) => invoke<void>("set_autostart", { enabled });
 export const openDevtools = () => invoke<void>("open_devtools");
+
+/** A keyboard shortcut for the shell to carry out (see shortcuts.rs). Resolves to an unlisten fn. */
+export const onShortcut = (cb: (name: "settings") => void) => listen<"settings">("shortcut", (e) => cb(e.payload));
 
 /** Full snapshot pushed by Rust on every state change (see webviews.rs). Resolves to an unlisten fn. */
 export const onServicesChanged = (cb: (services: Service[]) => void) =>

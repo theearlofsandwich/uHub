@@ -10,6 +10,7 @@ import {
   goHome,
   listServices,
   onServicesChanged,
+  onShortcut,
   reloadService,
   removeService,
   reorderServices,
@@ -110,7 +111,15 @@ export default function App() {
   // The modal is only rendered once the shell covers the window, and the
   // shell shrinks back only after it is gone, so it never shows squeezed
   // into the bar.
-  const openModal = (m: Service | "new" | "settings") => void run(setOverlay(true).then(() => setModal(m)));
+  const openModal = useCallback(
+    (m: Service | "new" | "settings") => void run(setOverlay(true).then(() => setModal(m))),
+    [run],
+  );
+  // Rust pauses shortcuts while a modal is open, so this never replaces one.
+  useEffect(() => {
+    const unlisten = onShortcut((name) => name === "settings" && openModal("settings"));
+    return () => void unlisten.then((f) => f());
+  }, [openModal]);
   const closeModal = useCallback(() => {
     setModal(null);
     void run(setOverlay(false));

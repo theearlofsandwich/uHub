@@ -52,6 +52,11 @@
 //!   `ICoreWebView2_11::add_ContextMenuRequested` to add an item; WKWebView
 //!   only through overriding `willOpenMenu:withEvent:` on wry's view.
 //!   Elsewhere the link menu is the webview's own.
+//! - **Keyboard shortcuts** (`watch_shortcuts`): GTK's `key-press-event` on
+//!   the window, which sees a key before the focused webview does. WebView2
+//!   has `ICoreWebView2Controller::add_AcceleratorKeyPressed` (per webview,
+//!   so each service's too); on macOS the natural home is the app menu's key
+//!   equivalents. Elsewhere there are no shortcuts yet.
 //! - **Unread badges** work everywhere (`on_document_title_changed` on non-Linux).
 
 #[cfg(target_os = "linux")]
@@ -64,6 +69,7 @@ mod other;
 use other as imp;
 
 use crate::services::{BarPosition, IconSize, PermissionKind};
+use crate::shortcuts::{self, Shortcut};
 use std::sync::{Arc, Mutex};
 use tauri::{webview::WebviewBuilder, AppHandle, Runtime, Webview, Window, WindowEvent};
 
@@ -207,6 +213,19 @@ fn text_on(color: &str) -> &'static str {
     // Perceived brightness (ITU-R BT.601).
     let luma = 0.299 * channel(1) + 0.587 * channel(3) + 0.114 * channel(5);
     if luma > 0.6 { "#16181d" } else { "#ffffff" }
+}
+
+/// Call `run` for every shortcut pressed in `window`, whichever webview has
+/// focus, except while they are paused; the page doesn't get those keys.
+/// Main thread only.
+pub fn watch_shortcuts<R: Runtime>(window: &Window<R>, run: impl Fn(Shortcut) + 'static) -> tauri::Result<()> {
+    imp::watch_keys(window, move |key, mods| match shortcuts::shortcut(key, mods) {
+        Some(shortcut) if !shortcuts::paused() => {
+            run(shortcut);
+            true
+        }
+        _ => false,
+    })
 }
 
 /// Window event handler: keeps the layout in step with the window's size.
