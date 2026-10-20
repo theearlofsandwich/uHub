@@ -38,6 +38,7 @@ const DEFAULTS: Options = {
   hibernation: false,
   hibernateAfterMinutes: 15,
   openLinksInside: false,
+  startHibernated: false,
 };
 
 /** The form's options as `s` has them. */
@@ -51,6 +52,7 @@ function optionsOf(s: Service): Options {
     hibernation: !s.keepAlive,
     hibernateAfterMinutes: s.hibernateAfterMinutes ?? DEFAULTS.hibernateAfterMinutes,
     openLinksInside: s.openLinksInside,
+    startHibernated: s.startHibernated,
   };
 }
 
@@ -297,6 +299,12 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
                 ))}
               </select>
             </label>
+            <Switch
+              label="Start hibernated"
+              hint="Stays unloaded when uHub starts, until you open it. Otherwise it loads in the background"
+              checked={opts.startHibernated}
+              onChange={set("startHibernated")}
+            />
             <Switch
               label="Open URLs in uHub"
               hint="Links to other sites open in a uHub window instead of your browser"

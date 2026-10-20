@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type SyntheticEvent } from "react";
+import { useEffect, useId, useRef, useState, type SyntheticEvent } from "react";
 import type { BarPosition, IconSize, Settings } from "../services/types";
 import { Section, Switch } from "./AppModal";
 
@@ -26,6 +26,22 @@ const iconSizes: { value: IconSize; label: string }[] = [
   { value: "large", label: "Large" },
   { value: "extra-large", label: "Extra large" },
 ];
+
+/** Theme colours offered as swatches; the colour input picks any other. Lowercase, like its value. */
+const swatches: { value: string; label: string }[] = [
+  { value: "#5b8cff", label: "Blue" },
+  { value: "#8b5cf6", label: "Purple" },
+  { value: "#ec4899", label: "Pink" },
+  { value: "#ef4444", label: "Red" },
+  { value: "#f97316", label: "Orange" },
+  { value: "#eab308", label: "Yellow" },
+  { value: "#22c55e", label: "Green" },
+  { value: "#14b8a6", label: "Teal" },
+  { value: "#64748b", label: "Slate" },
+];
+
+/** How long the colour input must rest, in ms, before its colour is saved. */
+const COLOR_SAVE_DELAY = 250;
 
 /** App-wide settings. Rendered while the shell covers the window, like `AppModal`. */
 export function SettingsModal({ settings, onPreview, onChange, onClose }: Props) {
@@ -59,6 +75,16 @@ export function SettingsModal({ settings, onPreview, onChange, onClose }: Props)
       onKeyUp: (e: SyntheticEvent<HTMLInputElement>) => set(key)(parse(e.currentTarget.value)),
     });
 
+  // The colour input reports every colour it passes through: preview each,
+  // save the one it rests on. Not cancelled on close, so that one is saved.
+  const colorTimer = useRef<number | undefined>(undefined);
+  const pickColor = (color: string) => {
+    if (!settings) return;
+    onPreview({ ...settings, theme_color: color });
+    window.clearTimeout(colorTimer.current);
+    colorTimer.current = window.setTimeout(() => set("theme_color")(color), COLOR_SAVE_DELAY);
+  };
+
   const horizontal = settings?.bar_position === "top" || settings?.bar_position === "bottom";
 
   return (
@@ -73,56 +99,90 @@ export function SettingsModal({ settings, onPreview, onChange, onClose }: Props)
 
         <div className="modal-body">
           {settings ? (
-            <Section title="App bar">
-              <label className="row-field">
-                <span>
-                  Position
-                  <small>{horizontal ? "Along the window's edge" : "Icons only; hover an app for its name"}</small>
-                </span>
-                <select
-                  value={settings.bar_position}
-                  onChange={(e) => set("bar_position")(e.target.value as BarPosition)}
-                >
-                  {positions.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {horizontal && (
-                <Switch
-                  label="Show labels"
-                  hint="App names next to their icons"
-                  checked={settings.bar_labels}
-                  onChange={set("bar_labels")}
-                />
-              )}
-              <label className="row-field">
-                <span>Icon size</span>
-                <select value={settings.icon_size} onChange={(e) => set("icon_size")(e.target.value as IconSize)}>
-                  {iconSizes.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="row-field">
-                <span>Spacing</span>
-                <span className="range-field">
-                  <input
-                    type="range"
-                    min={0}
-                    max={16}
-                    step={1}
-                    value={settings.icon_spacing}
-                    {...slide("icon_spacing", Number)}
+            <>
+              <Section title="App bar">
+                <label className="row-field">
+                  <span>
+                    Position
+                    <small>{horizontal ? "Along the window's edge" : "Icons only; hover an app for its name"}</small>
+                  </span>
+                  <select
+                    value={settings.bar_position}
+                    onChange={(e) => set("bar_position")(e.target.value as BarPosition)}
+                  >
+                    {positions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {horizontal && (
+                  <Switch
+                    label="Show labels"
+                    hint="App names next to their icons"
+                    checked={settings.bar_labels}
+                    onChange={set("bar_labels")}
                   />
-                  <output>{settings.icon_spacing}px</output>
-                </span>
-              </label>
-            </Section>
+                )}
+                <label className="row-field">
+                  <span>Icon size</span>
+                  <select value={settings.icon_size} onChange={(e) => set("icon_size")(e.target.value as IconSize)}>
+                    {iconSizes.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="row-field">
+                  <span>Spacing</span>
+                  <span className="range-field">
+                    <input
+                      type="range"
+                      min={0}
+                      max={16}
+                      step={1}
+                      value={settings.icon_spacing}
+                      {...slide("icon_spacing", Number)}
+                    />
+                    <output>{settings.icon_spacing}px</output>
+                  </span>
+                </label>
+              </Section>
+              <Section title="Theme">
+                <div className="row-field">
+                  <span>
+                    Colour
+                    <small>The title bar and highlights</small>
+                  </span>
+                  <span className="color-field">
+                    {swatches.map((c) => (
+                      <button
+                        key={c.value}
+                        type="button"
+                        className="swatch"
+                        style={{ background: c.value }}
+                        title={c.label}
+                        aria-label={c.label}
+                        aria-pressed={settings.theme_color === c.value}
+                        onClick={() => {
+                          window.clearTimeout(colorTimer.current);
+                          set("theme_color")(c.value);
+                        }}
+                      />
+                    ))}
+                    <input
+                      type="color"
+                      title="Custom colour"
+                      aria-label="Custom colour"
+                      value={settings.theme_color}
+                      onChange={(e) => pickColor(e.target.value)}
+                    />
+                  </span>
+                </div>
+              </Section>
+            </>
           ) : (
             <p className="modal-empty">Loading…</p>
           )}

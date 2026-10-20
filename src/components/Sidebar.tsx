@@ -153,7 +153,7 @@ export function Sidebar({
                     : `${s.name}\n${s.url}\nprofile: ${s.profile}`
               }
             >
-              <span className="service-icon">
+              <span className={s.icon ? "service-icon has-image" : "service-icon"}>
                 {s.icon ? <img src={s.icon} alt="" draggable={false} /> : <span className="icon-letter">{s.name[0]?.toUpperCase()}</span>}
                 <span className={"dot " + s.state} />
               </span>

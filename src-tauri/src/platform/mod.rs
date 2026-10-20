@@ -36,6 +36,22 @@
 //! - **The shell over a service** (`set_overlay`, for modals): the shell is
 //!   resized to the window and re-added to raise it over the services, but its
 //!   transparency needs tauri's `macos-private-api` on macOS. Untested.
+//! - **Title bar colour** (`set_title_bar_color`): GTK CSS on Linux, which only
+//!   reaches a title bar GTK draws (client-side decorations, as on GNOME), not
+//!   one an X11 window manager draws. Windows 11 could use
+//!   `DwmSetWindowAttribute(DWMWA_CAPTION_COLOR)`; macOS has no caption colour
+//!   short of a transparent title bar over a painted background. Elsewhere it
+//!   does nothing yet.
+//! - **Following off-site links** (`FOLLOWS_LINKS`): WebKitGTK's `decide-policy`
+//!   says whether the user clicked a link. WebView2's `NavigationStarting` has
+//!   `IsUserInitiated`; WKWebView's `decidePolicyForNavigationAction:` has the
+//!   navigation type, but wry owns that delegate. Until then off-site links
+//!   open like `target=_blank` ones (the init script makes them so).
+//! - **"Open in uHub" on links** (`ServiceEvents::offers_open_in_app`):
+//!   WebKitGTK's `context-menu` signal. WebView2 has
+//!   `ICoreWebView2_11::add_ContextMenuRequested` to add an item; WKWebView
+//!   only through overriding `willOpenMenu:withEvent:` on wry's view.
+//!   Elsewhere the link menu is the webview's own.
 //! - **Unread badges** work everywhere (`on_document_title_changed` on non-Linux).
 
 #[cfg(target_os = "linux")]
@@ -49,7 +65,7 @@ use other as imp;
 
 use crate::services::{BarPosition, IconSize, PermissionKind};
 use std::sync::{Arc, Mutex};
-use tauri::{webview::WebviewBuilder, Runtime, Webview, Window, WindowEvent};
+use tauri::{webview::WebviewBuilder, AppHandle, Runtime, Webview, Window, WindowEvent};
 
 /// Where the shell (the app bar) sits: the window edge and its thickness in
 /// logical pixels.
@@ -128,7 +144,20 @@ pub trait ServiceEvents: Send + Sync + 'static {
     fn watches_audio(&self) -> bool;
     #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "no non-Linux hook yet, see module docs"))]
     fn playing_audio(&self, playing: bool);
+    /// Whether a link's context menu offers "Open in uHub" for `url`.
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "no non-Linux hook yet, see module docs"))]
+    fn offers_open_in_app(&self, url: &str) -> bool;
+    /// Decide a navigation of the page (or a frame in it) to `url`: `true` to
+    /// allow. `followed` when the user brought it about (see `FOLLOWS_LINKS`).
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "no non-Linux hook yet, see module docs"))]
+    fn navigation(&self, url: &str, followed: bool) -> bool;
 }
+
+/// Whether the platform tells the user's link clicks from other navigations
+/// (`ServiceEvents::navigation`), so an off-site link without a target is
+/// followed in the service's webview. Elsewhere the builder's URL-only
+/// `on_navigation` decides, and such links open like `target=_blank` ones.
+pub const FOLLOWS_LINKS: bool = cfg!(target_os = "linux");
 
 /// Lay out the shell as the app bar, at the edge `set_bar` chose.
 pub fn place_shell<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
@@ -162,6 +191,22 @@ pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result
 /// shows a modal), or go back to being the bar.
 pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
     imp::set_overlay(shell, open)
+}
+
+/// Paint every window's title bar in `color` (`#rrggbb`, as `Settings`
+/// validates it), with text that contrasts with it.
+pub fn set_title_bar_color<R: Runtime>(app: &AppHandle<R>, color: &str) -> tauri::Result<()> {
+    imp::set_title_bar_color(app, color)
+}
+
+/// Black or white text, whichever reads better on `color` (`#rrggbb`): the
+/// shell picks the same (`onColor` in src/App.tsx).
+#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "no title bar colour outside Linux yet"))]
+fn text_on(color: &str) -> &'static str {
+    let channel = |i: usize| f64::from(u8::from_str_radix(&color[i..i + 2], 16).unwrap_or(0)) / 255.;
+    // Perceived brightness (ITU-R BT.601).
+    let luma = 0.299 * channel(1) + 0.587 * channel(3) + 0.114 * channel(5);
+    if luma > 0.6 { "#16181d" } else { "#ffffff" }
 }
 
 /// Window event handler: keeps the layout in step with the window's size.

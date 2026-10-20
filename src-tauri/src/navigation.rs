@@ -40,23 +40,31 @@ pub fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
     }
 }
 
-/// Top-level *and subframe* navigations: WebKitGTK routes every
-/// NavigationAction through here and the URL carries no frame or user-gesture
-/// info, so a third-party iframe (YouTube embed, sign-in widget) is
-/// indistinguishable from a link click. Off-site URLs are therefore only
-/// denied and logged, never opened externally — that would spawn browser tabs
-/// with no click. User clicks on off-site links are turned into
+/// The policy for a navigation of a service's page, top-level *or subframe*:
+/// on-site ones are allowed, off-site ones only when `followed` (the user
+/// clicked a link, went back or forward, reloaded, or a redirect of one of
+/// those). Off-site URLs are never opened externally from here — a third-party
+/// iframe (YouTube embed, sign-in widget) would spawn browser tabs with no click.
+pub fn allow<S: AsRef<str>>(id: &str, url: &Url, allowed: &[S], followed: bool) -> bool {
+    if is_internal(url, allowed) {
+        log::debug!("[{id}] navigate: {url}");
+        true
+    } else if followed && matches!(url.scheme(), "http" | "https") {
+        log::info!("[{id}] following off-site: {url}");
+        true
+    } else {
+        log::info!("[{id}] blocked navigation to {url}");
+        false
+    }
+}
+
+/// The builder's URL-only policy: a URL carries no frame or user-gesture info,
+/// so nothing counts as followed. Where the platform can tell
+/// (`platform::FOLLOWS_LINKS`) it takes over once the webview exists; until
+/// then, and elsewhere, user clicks on off-site links are turned into
 /// `target=_blank` by the shared init script and arrive via [`on_new_window`].
 pub fn on_navigation(id: String, allowed: Vec<String>) -> impl Fn(&Url) -> bool + Send + 'static {
-    move |url| {
-        if is_internal(url, &allowed) {
-            log::debug!("[{id}] navigate: {url}");
-            true
-        } else {
-            log::info!("[{id}] blocked navigation to {url}");
-            false
-        }
-    }
+    move |url| allow(&id, url, &allowed, false)
 }
 
 /// `target=_blank` / `window.open()` (including off-site link clicks rewritten
@@ -145,5 +153,15 @@ mod tests {
         assert!(!internal("https://whatsapp.com.evil.io/"));
         assert!(!internal("file:///etc/passwd"));
         assert!(!internal("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn follows_off_site_only_when_followed() {
+        let allows = |u: &str, followed| allow("wa", &u.parse().unwrap(), WA, followed);
+        assert!(allows("https://web.whatsapp.com/", false));
+        assert!(!allows("https://www.bbc.co.uk/", false));
+        assert!(allows("https://www.bbc.co.uk/", true));
+        assert!(!allows("file:///etc/passwd", true));
+        assert!(!allows("javascript:alert(1)", true));
     }
 }

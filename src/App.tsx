@@ -32,6 +32,13 @@ function toError(e: unknown): { kind?: string; message: string } {
   return { message: String(e) };
 }
 
+/** Black or white text, whichever reads better on `color` (`#rrggbb`); the same as `text_on` in src-tauri/src/platform/mod.rs. */
+function onColor(color: string): string {
+  const channel = (i: number) => parseInt(color.slice(i, i + 2), 16) / 255;
+  const luma = 0.299 * channel(1) + 0.587 * channel(3) + 0.114 * channel(5);
+  return luma > 0.6 ? "#16181d" : "#ffffff";
+}
+
 export default function App() {
   const [services, setServices] = useState<Service[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -76,6 +83,15 @@ export default function App() {
       })
       .catch((e) => setError(toError(e)));
   }, []);
+
+  // The accent follows the theme colour, previews included (Rust paints the title bar).
+  const themeColor = settings?.theme_color;
+  useEffect(() => {
+    if (!themeColor) return;
+    const root = document.documentElement.style;
+    root.setProperty("--accent", themeColor);
+    root.setProperty("--on-accent", onColor(themeColor));
+  }, [themeColor]);
 
   // Shown before Rust has saved it (and moved the bar's webview), so the
   // change is immediate; the modal covers the window meanwhile. A failed save

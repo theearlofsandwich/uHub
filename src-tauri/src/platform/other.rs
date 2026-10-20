@@ -13,7 +13,7 @@ use std::sync::{
 };
 use tauri::{
     webview::{PermissionKind as Native, PermissionResponse, WebviewBuilder},
-    LogicalPosition, LogicalSize, PhysicalSize, Rect, Runtime, Webview, Window, WindowEvent,
+    AppHandle, LogicalPosition, LogicalSize, PhysicalSize, Rect, Runtime, Webview, Window, WindowEvent,
 };
 
 /// The shell's label (lib.rs); every other child webview is a service.
@@ -104,6 +104,11 @@ pub fn relayout<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
     for webview in window.webviews() {
         place(&webview, size)?;
     }
+    Ok(())
+}
+
+/// Not implemented here yet (see mod.rs): the title bar keeps the system's colour.
+pub fn set_title_bar_color<R: Runtime>(_app: &AppHandle<R>, _color: &str) -> tauri::Result<()> {
     Ok(())
 }
 

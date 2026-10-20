@@ -44,7 +44,7 @@ use std::{
 use tauri::{
     async_runtime::{self, Mutex},
     webview::{PageLoadEvent, WebviewBuilder},
-    AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Runtime, State, Webview,
+    AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Runtime, State, Url, Webview,
     WebviewUrl, Wry,
 };
 use tauri_plugin_notification::NotificationExt;
@@ -75,6 +75,11 @@ impl Services {
     /// Before it is shared: the setting the tray starts with.
     pub fn close_to_tray(&mut self) -> bool {
         self.0.get_mut().config.settings().close_to_tray
+    }
+
+    /// Before it is shared: the colour the title bar starts with.
+    pub fn theme_color(&mut self) -> String {
+        self.0.get_mut().config.settings().theme_color.clone()
     }
 
     /// Before it is shared: where the shell is placed.
@@ -248,6 +253,23 @@ impl<R: Runtime> ServiceEvents for Reporter<R> {
     fn playing_audio(&self, playing: bool) {
         on_playing_audio(&self.app, self.svc.id().to_owned(), self.generation, playing);
     }
+
+    /// Any web link, when `target=_blank` ones go to the system browser.
+    /// On-site ones too: pages often route outbound links through their own
+    /// redirector (Gmail's google.com/url?q=...), which looks on-site.
+    fn offers_open_in_app(&self, url: &str) -> bool {
+        !self.svc.instance.open_links_inside && url.parse::<Url>().is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+    }
+
+    fn navigation(&self, url: &str, followed: bool) -> bool {
+        match url.parse::<Url>() {
+            Ok(u) => navigation::allow(self.svc.id(), &u, self.svc.allowed_domains(), followed),
+            Err(e) => {
+                log::info!("[{}] blocked navigation to unparsable {url:?}: {e}", self.svc.id());
+                false
+            }
+        }
+    }
 }
 
 fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>> {
@@ -271,7 +293,7 @@ fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>
     let mut builder = WebviewBuilder::new(label(&id), WebviewUrl::External(url))
         // Distinct directory => distinct WebKit WebContext + WebsiteDataManager.
         .data_directory(data_dir)
-        .initialization_script(svc.init_script())
+        .initialization_script(svc.init_script(platform::FOLLOWS_LINKS))
         .on_navigation(navigation::on_navigation(id.clone(), svc.allowed_domains().to_vec()))
         .on_new_window(navigation::on_new_window(app.clone(), id.clone(), links_inside))
         .on_page_load(move |_wv, p| match p.event() {
@@ -457,15 +479,35 @@ pub fn spawn_hibernation(app: &AppHandle) {
     });
 }
 
-/// Activate the service that was on screen when the app last ran.
-pub fn restore_last_active(app: &AppHandle) {
+/// At startup: activate the service that was on screen when the app last
+/// ran, then load every other enabled one in the background unless it starts
+/// hibernated.
+pub fn start_services(app: &AppHandle) {
     let app = app.clone();
     async_runtime::spawn(async move {
         let id = app.state::<Services>().0.lock().await.config.last_active().map(str::to_owned);
-        if let Some(id) = id
-            && let Err(e) = activate(&app, &id).await
+        if let Some(id) = &id
+            && let Err(e) = activate(&app, id).await
         {
             log::warn!("[{id}] restoring last active service failed: {e}");
+        }
+
+        let state = app.state::<Services>();
+        let mut guard = state.0.lock().await;
+        let inner = &mut *guard;
+        let mut changed = false;
+        for svc in inner.config.services() {
+            if !svc.instance.enabled || svc.instance.start_hibernated {
+                continue;
+            }
+            log::info!("[{}] loading at startup", svc.id());
+            match inner.reg.preload(&Webviews(&app), svc) {
+                Ok(()) => changed = true,
+                Err(e) => log::error!("[{}] loading at startup failed: {e}", svc.id()),
+            }
+        }
+        if changed {
+            emit_snapshot(&app, inner);
         }
     });
 }
@@ -725,9 +767,13 @@ pub async fn set_settings(
 ) -> Result<()> {
     let mut guard = state.0.lock().await;
     let inner = &mut *guard;
+    let old_color = inner.config.settings().theme_color.clone();
     inner.config.set_settings(settings)?;
     let settings = inner.config.settings();
     tray::set_close_to_tray(&app, settings.close_to_tray);
+    if settings.theme_color != old_color {
+        platform::set_title_bar_color(&app, &settings.theme_color)?;
+    }
     let bar = platform::Bar::new(settings.bar_position, settings.icon_size);
     if bar != platform::bar() {
         platform::set_bar(bar, app.get_webview("shell").as_ref())?;

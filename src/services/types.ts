@@ -31,6 +31,8 @@ export interface Service {
   unreadBadge: boolean;
   /** Off-site links open in a uHub window instead of the browser. */
   openLinksInside: boolean;
+  /** Stays unloaded when uHub starts; otherwise (if enabled) it loads in the background. */
+  startHibernated: boolean;
   /** The page is playing audio right now (only reported on Linux). */
   playingAudio: boolean;
 }
@@ -50,6 +52,7 @@ export interface NewService {
   hibernation: boolean;
   hibernateAfterMinutes: number;
   openLinksInside: boolean;
+  startHibernated: boolean;
 }
 
 /** Mirrors `SiteInfo` in src-tauri/src/favicon.rs. */
@@ -75,6 +78,8 @@ export interface Settings {
   icon_size: IconSize;
   /** Gap between the bar's icons in px, 0 to 16 (MAX_ICON_SPACING in services.rs). */
   icon_spacing: number;
+  /** `#rrggbb`: the window's title bar and the shell's accents. */
+  theme_color: string;
 }
 
 export type BarPosition = "left" | "top" | "bottom" | "right";

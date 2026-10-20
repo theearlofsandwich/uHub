@@ -154,6 +154,10 @@ pub struct Instance {
     /// instead of the system browser.
     #[serde(default)]
     pub open_links_inside: bool,
+    /// Stay unloaded when uHub starts, until switched to; otherwise (if
+    /// enabled) it is loaded in the background at startup.
+    #[serde(default)]
+    pub start_hibernated: bool,
 }
 
 impl Instance {
@@ -174,6 +178,7 @@ impl Instance {
         self.media_indicator = new.media_indicator;
         self.unread_badge = new.unread_badge;
         self.open_links_inside = new.open_links_inside;
+        self.start_hibernated = new.start_hibernated;
         Ok(())
     }
 
@@ -195,6 +200,7 @@ impl Instance {
             media_indicator: true,
             unread_badge: true,
             open_links_inside: false,
+            start_hibernated: false,
         }
     }
 }
@@ -216,6 +222,7 @@ pub struct NewService {
     pub hibernation: bool,
     pub hibernate_after_minutes: u32,
     pub open_links_inside: bool,
+    pub start_hibernated: bool,
 }
 
 fn yes() -> bool {
@@ -250,6 +257,10 @@ pub struct Settings {
     /// The gap between the bar's icons, in logical pixels.
     #[serde(default = "default_icon_spacing")]
     pub icon_spacing: u32,
+    /// `#rrggbb`: the window's title bar and the shell's accents (the
+    /// selected app, buttons, switches).
+    #[serde(default = "default_theme_color")]
+    pub theme_color: String,
 }
 
 /// Largest `Settings::icon_spacing`; the shell's slider stops here too.
@@ -257,6 +268,15 @@ const MAX_ICON_SPACING: u32 = 16;
 
 fn default_icon_spacing() -> u32 {
     2
+}
+
+fn default_theme_color() -> String {
+    "#5b8cff".to_owned()
+}
+
+/// `#rrggbb`, the form `<input type="color">` gives.
+fn is_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -315,6 +335,7 @@ impl Default for Settings {
             bar_labels: false,
             icon_size: IconSize::default(),
             icon_spacing: default_icon_spacing(),
+            theme_color: default_theme_color(),
         }
     }
 }
@@ -329,6 +350,9 @@ impl Settings {
         }
         if self.icon_spacing > MAX_ICON_SPACING {
             return Err(Error::invalid(format!("icon spacing must be at most {MAX_ICON_SPACING}px")));
+        }
+        if !is_hex_color(&self.theme_color) {
+            return Err(Error::invalid(format!("theme colour {:?} must be #rrggbb", self.theme_color)));
         }
         Ok(())
     }
@@ -544,9 +568,12 @@ impl Service {
     /// Script run via `initialization_script`: at document-start on every
     /// top-level navigation, before any page script. Guarded to the service's own
     /// domains because it re-runs on every navigation (e.g. login redirects).
-    pub fn init_script(&self) -> String {
+    /// Unless `follow_links` (the platform lets the user's off-site link clicks
+    /// through, `platform::FOLLOWS_LINKS`), it makes them `target=_blank`.
+    pub fn init_script(&self, follow_links: bool) -> String {
         let hosts = serde_json::to_string(self.allowed_domains()).unwrap();
         let css = serde_json::to_string(self.recipe.inject_css).unwrap();
+        let links = if follow_links { "" } else { OFFSITE_LINKS_TO_BLANK };
         format!(
             r#"(function () {{
   var hosts = {hosts};
@@ -555,20 +582,7 @@ impl Service {
     return hosts.some(function (d) {{ return host === d || host.endsWith("." + d); }});
   }};
   if (!own(h)) return;
-  // Off-site link clicks become target=_blank so they reach on_new_window and
-  // open in the system browser; plain navigations to them are only blocked.
-  // Bubble phase on window, so page handlers run first and can preventDefault.
-  window.addEventListener("click", function (e) {{
-    if (e.defaultPrevented || e.button !== 0) return;
-    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-    var a = e.target && e.target.closest && e.target.closest("a[href]");
-    if (!a || a.hasAttribute("download")) return;
-    var u;
-    try {{ u = new URL(a.href, location.href); }} catch (_) {{ return; }}
-    if ((u.protocol === "http:" || u.protocol === "https:") && !own(u.hostname)) {{
-      a.target = "_blank";
-    }}
-  }});
+  {links}
   {js}
   var css = {css};
   if (css.trim()) {{
@@ -586,6 +600,22 @@ impl Service {
         )
     }
 }
+
+/// Part of `init_script`: off-site link clicks become target=_blank so they
+/// reach on_new_window (the system browser, or a uHub window); the URL-only
+/// navigation policy would just block them. Bubble phase on window, so page
+/// handlers run first and can preventDefault.
+const OFFSITE_LINKS_TO_BLANK: &str = r#"window.addEventListener("click", function (e) {
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    var a = e.target && e.target.closest && e.target.closest("a[href]");
+    if (!a || a.hasAttribute("download")) return;
+    var u;
+    try { u = new URL(a.href, location.href); } catch (_) { return; }
+    if ((u.protocol === "http:" || u.protocol === "https:") && !own(u.hostname)) {
+      a.target = "_blank";
+    }
+  });"#;
 
 /// On-disk format of services.json.
 #[derive(Serialize, Deserialize)]
@@ -929,6 +959,7 @@ pub struct ServiceInfo {
     pub media_indicator: bool,
     pub unread_badge: bool,
     pub open_links_inside: bool,
+    pub start_hibernated: bool,
     /// The page is playing audio right now (Linux only, see platform/mod.rs).
     pub playing_audio: bool,
 }
@@ -1076,6 +1107,7 @@ mod tests {
             hibernation: true,
             hibernate_after_minutes: 15,
             open_links_inside: false,
+            start_hibernated: false,
         }
     }
 
@@ -1170,11 +1202,15 @@ mod tests {
             bar_labels: true,
             icon_size: IconSize::Large,
             icon_spacing: 8,
+            theme_color: "#22c55e".to_owned(),
         };
         c.set_settings(s.clone()).unwrap();
         assert!(c.set_settings(Settings { max_suspended: Some(1000), ..s.clone() }).is_err());
         assert!(c.set_settings(Settings { hibernate_after_minutes: u32::MAX, ..s.clone() }).is_err());
         assert!(c.set_settings(Settings { icon_spacing: 100, ..s.clone() }).is_err());
+        for bad in ["22c55e", "#22c55", "#22c55eff", "#ggg000", "red"] {
+            assert!(c.set_settings(Settings { theme_color: bad.to_owned(), ..s.clone() }).is_err(), "{bad}");
+        }
         c.set_last_active("gmail-work").unwrap();
         assert!(c.set_last_active("nope").is_err());
 
@@ -1233,6 +1269,7 @@ mod tests {
         opts.hibernation = false;
         opts.hibernate_after_minutes = 30;
         opts.open_links_inside = true;
+        opts.start_hibernated = true;
         opts.enabled = false;
         let id = c.add(&opts, |_| false).unwrap();
         assert!(id.starts_with("custom-"));
@@ -1240,12 +1277,14 @@ mod tests {
         assert_eq!(slack.url(), "https://app.slack.com/client");
         assert_eq!(slack.allowed_domains(), ["slack.com"]);
         assert!(slack.keep_alive(), "hibernation off: kept alive");
-        assert!(slack.init_script().contains(r#"["slack.com"]"#));
+        assert!(slack.init_script(false).contains(r#"["slack.com"]"#));
+        assert!(slack.init_script(false).contains("a.target = \"_blank\""));
+        assert!(!slack.init_script(true).contains("_blank"));
 
         let reloaded = Config::load(path).unwrap();
         let inst = &reloaded.find(&id).unwrap().instance;
         assert_eq!(inst, &slack.instance);
-        assert!(!inst.audio && !inst.enabled && inst.open_links_inside);
+        assert!(!inst.audio && !inst.enabled && inst.open_links_inside && inst.start_hibernated);
         assert_eq!(inst.hibernate_after_minutes, Some(30));
 
         let mut bad = new_app("X", "https://x.example/");

@@ -51,6 +51,7 @@ pub fn run() {
             let config_path = app.path().app_config_dir()?.join("services.json");
             let mut services = webviews::Services::load(config_path)?;
             let close_to_tray = services.close_to_tray();
+            platform::set_title_bar_color(app.handle(), &services.theme_color())?;
             platform::set_bar::<tauri::Wry>(services.bar(), None)?;
             app.manage(services);
             webviews::activate_on_notification_click(app.handle())?;
@@ -87,7 +88,7 @@ pub fn run() {
                 window.add_child(shell, LogicalPosition::new(x, y), LogicalSize::new(width, height))?;
             platform::place_shell(&shell)?;
             webviews::spawn_hibernation(app.handle());
-            webviews::restore_last_active(app.handle());
+            webviews::start_services(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

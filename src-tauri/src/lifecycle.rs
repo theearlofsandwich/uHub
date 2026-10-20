@@ -142,6 +142,7 @@ impl<H> Registry<H> {
                 media_indicator: s.instance.media_indicator,
                 unread_badge: s.instance.unread_badge,
                 open_links_inside: s.instance.open_links_inside,
+                start_hibernated: s.instance.start_hibernated,
                 playing_audio: self.playing.contains(s.id()),
             })
             .collect()
@@ -242,6 +243,32 @@ impl<H> Registry<H> {
                 Err(e)
             }
         }
+    }
+
+    /// Load `svc` in the background (SUSPENDED), as if it had just been
+    /// switched away from. A no-op if it already has a webview.
+    pub fn preload<B>(&mut self, backend: &B, svc: &Service) -> Result<(), B::Error>
+    where
+        B: Backend<Handle = H>,
+    {
+        let id = svc.id();
+        if self.handles.contains_key(id) {
+            return Ok(());
+        }
+        let handle = backend.create(svc)?;
+        if let Err(e) = backend.hide(id, &handle) {
+            // Not left on screen over the active service. If even closing
+            // fails it is kept, so hibernation retries the close.
+            if let Err(close) = backend.close(id, &handle) {
+                log::error!("[{id}] closing after failed preload: {close}");
+                self.handles.insert(id.to_owned(), handle);
+                self.hidden_at.insert(id.to_owned(), Instant::now());
+            }
+            return Err(e);
+        }
+        self.handles.insert(id.to_owned(), handle);
+        self.hidden_at.insert(id.to_owned(), Instant::now());
+        Ok(())
     }
 
     fn insert_new<B>(&mut self, backend: &B, svc: &Service) -> Result<(), B::Error>
@@ -405,6 +432,45 @@ mod tests {
         assert_eq!(reg.state(svc(0).id()), Lifecycle::Active);
         assert_eq!(reg.state(svc(1).id()), Lifecycle::Suspended);
         assert_eq!(fake.creates.get(), 2);
+        assert_consistent(&reg, &fake);
+    }
+
+    #[test]
+    fn preload_loads_in_the_background() {
+        let (mut reg, fake) = (Registry::default(), Fake::default());
+        reg.activate(&fake, svc(0)).unwrap();
+        reg.preload(&fake, svc(1)).unwrap();
+        assert_eq!(reg.state(svc(1).id()), Lifecycle::Suspended);
+        assert_eq!(reg.state(svc(0).id()), Lifecycle::Active);
+        assert_consistent(&reg, &fake);
+
+        // Already loaded: nothing to do, active or not.
+        reg.preload(&fake, svc(0)).unwrap();
+        reg.preload(&fake, svc(1)).unwrap();
+        assert_eq!(fake.creates.get(), 2);
+        assert_eq!(reg.state(svc(0).id()), Lifecycle::Active);
+
+        // Switching to it shows the preloaded page.
+        reg.activate(&fake, svc(1)).unwrap();
+        assert_eq!(fake.creates.get(), 2);
+        assert_consistent(&reg, &fake);
+    }
+
+    #[test]
+    fn failed_preload_leaves_nothing_on_screen() {
+        let (mut reg, fake) = (Registry::default(), Fake::default());
+        reg.activate(&fake, svc(0)).unwrap();
+        fake.fail_on("hide", svc(1).id());
+        assert!(reg.preload(&fake, svc(1)).is_err());
+        assert_eq!(reg.state(svc(1).id()), Lifecycle::Unloaded);
+        assert_consistent(&reg, &fake);
+
+        // Not even closable: kept, suspended, for hibernation to retry.
+        fake.fail_on("hide", svc(2).id());
+        fake.fail_on("close", svc(2).id());
+        assert!(reg.preload(&fake, svc(2)).is_err());
+        assert_eq!(reg.state(svc(2).id()), Lifecycle::Suspended);
+        fake.visible.borrow_mut().remove(svc(2).id());
         assert_consistent(&reg, &fake);
     }
 
