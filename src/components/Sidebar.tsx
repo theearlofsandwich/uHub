@@ -6,6 +6,8 @@ interface Props {
   /** null until loaded. */
   settings: Settings | null;
   onSelect: (id: string) => void;
+  /** Right-click on a service; `anchor` is its row. */
+  onMenu: (service: Service, anchor: DOMRect) => void;
   onUnload: (id: string) => void;
   /** Open the "Add app" modal. */
   onAdd: () => void;
@@ -19,6 +21,7 @@ export function Sidebar({
   services,
   settings: appSettings,
   onSelect,
+  onMenu,
   onUnload,
   onAdd,
   onRemove,
@@ -37,11 +40,22 @@ export function Sidebar({
           <li key={s.id}>
             <button
               className={"service" + (s.state === "active" ? " selected" : "")}
-              disabled={!s.enabled}
-              onClick={() => onSelect(s.id)}
+              // Not `disabled`: that would swallow the right-click that re-enables it.
+              aria-disabled={!s.enabled}
+              // Primary button only: a right-click opens the menu, it doesn't switch.
+              onClick={(e) => e.button === 0 && s.enabled && onSelect(s.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                const anchor = e.currentTarget.getBoundingClientRect();
+                // GTK fires this on press, and a menu that opens under the pointer
+                // takes the release as a pick: wait for the button to come up.
+                // (A keyboard-opened menu has no button held.)
+                if (e.buttons & 2) window.addEventListener("mouseup", () => onMenu(s, anchor), { once: true });
+                else onMenu(s, anchor);
+              }}
               title={
                 !s.enabled
-                  ? `${s.name} is disabled`
+                  ? `${s.name} is disabled (right-click to enable)`
                   : s.state === "crashed"
                     ? "Crashed: click to reload"
                     : `${s.url}\nprofile: ${s.profile}`

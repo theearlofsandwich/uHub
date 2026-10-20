@@ -157,6 +157,26 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Point at `url` (an instance of the recipe covering it, see
+    /// [`recipe_for`]) and take the form's options. Id, profile and order stay.
+    fn apply(&mut self, new: &NewService) -> Result<()> {
+        let url = parse_app_url(new.url.trim())?;
+        let recipe = recipe_for(&url);
+        self.name = validate_name(&new.name)?;
+        self.recipe = recipe.id.into();
+        self.url = (url.as_str() != recipe.url).then(|| url.to_string());
+        self.enabled = new.enabled;
+        self.permissions.notifications = new.notifications;
+        self.keep_alive = Some(!new.hibernation);
+        self.hibernate_after_minutes = Some(new.hibernate_after_minutes);
+        self.icon = new.icon.clone();
+        self.audio = new.audio;
+        self.media_indicator = new.media_indicator;
+        self.unread_badge = new.unread_badge;
+        self.open_links_inside = new.open_links_inside;
+        Ok(())
+    }
+
     /// An instance with every option at its default, in its own profile named after `id`.
     fn new(id: String, name: String, recipe: &str, order: u32) -> Self {
         Self {
@@ -179,7 +199,8 @@ impl Instance {
     }
 }
 
-/// What the shell's "Add app" form sends: the app's URL rather than a recipe.
+/// What the shell's "Add app" and "Edit app" forms send: the app's URL rather
+/// than a recipe.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct NewService {
@@ -652,22 +673,24 @@ impl Config {
         let id = fresh_id(recipe.id, unix_millis(), |c| {
             self.services().iter().any(|s| s.instance.id == c || s.instance.profile == c) || profile_taken(c)
         });
-        let mut inst = Instance::new(id.clone(), validate_name(&new.name)?, recipe.id, self.services().len() as u32);
-        inst.url = (url.as_str() != recipe.url).then(|| url.to_string());
-        inst.enabled = new.enabled;
-        inst.permissions.notifications = new.notifications;
-        inst.keep_alive = Some(!new.hibernation);
-        inst.hibernate_after_minutes = Some(new.hibernate_after_minutes);
-        inst.icon = new.icon.clone();
-        inst.audio = new.audio;
-        inst.media_indicator = new.media_indicator;
-        inst.unread_badge = new.unread_badge;
-        inst.open_links_inside = new.open_links_inside;
+        let mut inst = Instance::new(id.clone(), String::new(), recipe.id, self.services().len() as u32);
+        inst.apply(new)?;
         let svc = Service::new(inst)?;
         let mut next = self.saved.clone();
         next.services.push(svc);
         self.commit(next)?;
         Ok(id)
+    }
+
+    /// Replace `id`'s settings with the "Edit app" form's. A new URL may make
+    /// it an instance of another recipe; it keeps its id and profile (logins).
+    pub fn update(&mut self, id: &str, new: &NewService) -> Result<()> {
+        let mut next = self.saved.clone();
+        let svc = next.services.iter_mut().find(|s| s.id() == id).ok_or_else(|| unknown(id))?;
+        let mut inst = svc.instance.clone();
+        inst.apply(new)?;
+        *svc = Service::new(inst)?;
+        self.commit(next)
     }
 
     /// Remove `id`, returning it. Its webview must already be gone.
@@ -690,6 +713,21 @@ impl Config {
 
     pub fn set_keep_alive(&mut self, id: &str, keep_alive: bool) -> Result<()> {
         let next = self.with_service(id, |inst| inst.keep_alive = Some(keep_alive))?;
+        self.commit(next)
+    }
+
+    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<()> {
+        let next = self.with_service(id, |inst| inst.enabled = enabled)?;
+        self.commit(next)
+    }
+
+    pub fn set_audio(&mut self, id: &str, audio: bool) -> Result<()> {
+        let next = self.with_service(id, |inst| inst.audio = audio)?;
+        self.commit(next)
+    }
+
+    pub fn set_notifications(&mut self, id: &str, notifications: bool) -> Result<()> {
+        let next = self.with_service(id, |inst| inst.permissions.notifications = notifications)?;
         self.commit(next)
     }
 
@@ -813,9 +851,13 @@ pub struct ServiceInfo {
     pub unread: u32,
     /// Never hibernated (the instance's setting or the recipe's default).
     pub keep_alive: bool,
+    /// `None`: the app-wide `Settings::hibernate_after_minutes`.
+    pub hibernate_after_minutes: Option<u32>,
+    pub notifications: bool,
     pub audio: bool,
     pub media_indicator: bool,
     pub unread_badge: bool,
+    pub open_links_inside: bool,
     /// The page is playing audio right now (Linux only, see platform/mod.rs).
     pub playing_audio: bool,
 }
@@ -991,6 +1033,13 @@ mod tests {
         assert!(c.remove("gmail-work").is_err());
         assert!(c.rename("nope", "x").is_err());
 
+        c.set_enabled(&id, false).unwrap();
+        c.set_audio(&id, false).unwrap();
+        c.set_notifications(&id, false).unwrap();
+        let inst = &c.find(&id).unwrap().instance;
+        assert!(!inst.enabled && !inst.audio && !inst.permissions.notifications);
+        assert!(c.set_audio("nope", false).is_err());
+
         let reloaded = Config::load(path).unwrap();
         assert_eq!(ids(&reloaded), ids(&c));
         let orders: Vec<_> = reloaded.services().iter().map(|s| s.instance.order).collect();
@@ -1119,6 +1168,30 @@ mod tests {
         bad.hibernate_after_minutes = 0;
         assert!(c.add(&bad, |_| false).is_err());
         assert!(c.add(&new_app("X", "https://user:pw@x.example/"), |_| false).is_err());
+    }
+
+    #[test]
+    fn update_keeps_id_and_profile_and_may_change_recipe() {
+        let path = temp_dir("update").join("services.json");
+        let mut c = Config::load(path.clone()).unwrap();
+        let mut opts = new_app("Mail", "https://mail.google.com/mail/u/1/");
+        opts.audio = false;
+        opts.hibernation = false;
+        c.update("gmail-work", &opts).unwrap();
+        let svc = c.find("gmail-work").unwrap();
+        assert_eq!((svc.instance.name.as_str(), svc.recipe.id), ("Mail", "gmail"));
+        assert_eq!(svc.url(), "https://mail.google.com/mail/u/1/");
+        assert!(!svc.instance.audio && svc.keep_alive());
+
+        c.update("gmail-work", &new_app("Slack", "https://app.slack.com/")).unwrap();
+        let svc = c.find("gmail-work").unwrap();
+        assert_eq!((svc.recipe.id, svc.instance.profile.as_str()), (CUSTOM, "gmail-work"));
+        assert_eq!(svc.allowed_domains(), ["slack.com"]);
+
+        assert!(c.update("gmail-work", &new_app(" ", "https://app.slack.com/")).is_err());
+        assert!(c.update("nope", &new_app("X", "https://x.example/")).is_err());
+        let reloaded = Config::load(path).unwrap();
+        assert_eq!(reloaded.find("gmail-work").unwrap().instance, c.find("gmail-work").unwrap().instance);
     }
 
     #[test]

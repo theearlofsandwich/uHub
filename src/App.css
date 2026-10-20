@@ -29,8 +29,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
   padding: 9px 10px; margin-bottom: 2px; border: 0; border-radius: 6px;
   background: transparent; text-align: left;
 }
-.service:hover:not(:disabled) { background: var(--hover); }
-.service:disabled { opacity: .45; cursor: default; }
+.service:hover:not(:disabled, [aria-disabled="true"]) { background: var(--hover); }
+.service:disabled, .service[aria-disabled="true"] { opacity: .45; cursor: default; }
 .service.selected { background: var(--accent); color: #fff; font-weight: 600; }
 .service-icon {
   position: relative; flex: none; display: grid; place-items: center;
@@ -101,11 +101,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
   padding: 12px 20px 16px; border-top: 1px solid #2a2d36;
 }
 .modal-footer .field-error { flex: 1 1 100%; margin: 0 0 4px; }
+.modal-footer .start { margin-right: auto; }
+.modal-footer .confirm { flex: 1; margin: 0; }
 
 .button { padding: 7px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--hover); }
 .button:hover:not(:disabled) { border-color: #4a4e5a; }
 .button.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
 .button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.button.danger { border-color: #7a2e35; background: #5c2328; color: #fff; }
+.button.danger:hover:not(:disabled) { filter: brightness(1.15); }
 .button:disabled, .icon-button:disabled { opacity: .45; cursor: default; }
 .link-button { margin-left: 8px; padding: 0; border: 0; background: none; color: var(--accent); font-size: inherit; }
 .link-button:hover { text-decoration: underline; }

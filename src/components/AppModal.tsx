@@ -1,10 +1,14 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { inspectSite } from "../services/api";
-import type { NewService, SiteInfo } from "../services/types";
+import type { NewService, Service, SiteInfo } from "../services/types";
 
 interface Props {
+  /** The app to edit; absent to add a new one. */
+  service?: Service;
   /** Rejects with a `CommandError` (or anything) to keep the modal open and show it. */
   onSubmit: (service: NewService) => Promise<void>;
+  /** Editing only: remove the app. Rejects like `onSubmit`. */
+  onRemove?: () => Promise<void>;
   onClose: () => void;
 }
 
@@ -35,6 +39,20 @@ const DEFAULTS: Options = {
   hibernateAfterMinutes: 15,
   openLinksInside: false,
 };
+
+/** The form's options as `s` has them. */
+function optionsOf(s: Service): Options {
+  return {
+    notifications: s.notifications,
+    audio: s.audio,
+    mediaIndicator: s.mediaIndicator,
+    unreadBadge: s.unreadBadge,
+    enabled: s.enabled,
+    hibernation: !s.keepAlive,
+    hibernateAfterMinutes: s.hibernateAfterMinutes ?? DEFAULTS.hibernateAfterMinutes,
+    openLinksInside: s.openLinksInside,
+  };
+}
 
 /** "slack.com" -> "https://slack.com/"; null unless it is a plausible http(s) address. */
 function normalizeUrl(input: string): string | null {
@@ -88,17 +106,29 @@ type Site =
   | { status: "done"; url: string; info: SiteInfo }
   | { status: "error"; url: string; error: string };
 
-/** "Add app": name, address, icon and per-app options. Rendered while the shell covers the window. */
-export function AddAppModal({ onSubmit, onClose }: Props) {
-  const [name, setName] = useState("");
-  const [address, setAddress] = useState("");
-  const [customIcon, setCustomIcon] = useState<string | null>(null);
+/**
+ * "Add app", or "Edit app" given a `service`: name, address, icon and per-app
+ * options. Rendered while the shell covers the window.
+ */
+export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
+  const [name, setName] = useState(service?.name ?? "");
+  const [address, setAddress] = useState(service?.url ?? "");
+  // An app's current icon counts as custom, so the site's doesn't replace it.
+  const [customIcon, setCustomIcon] = useState<string | null>(service?.icon ?? null);
   const [iconError, setIconError] = useState<string | null>(null);
-  const [opts, setOpts] = useState<Options>(DEFAULTS);
+  const [opts, setOpts] = useState<Options>(service ? optionsOf(service) : DEFAULTS);
   const [site, setSite] = useState<Site>({ status: "idle" });
   const [submitting, setSubmitting] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleId = useId();
+  const title = service ? "Edit app" : "Add app";
+  // An edited app may have a delay the presets don't offer.
+  const hibernateOptions = HIBERNATE_OPTIONS.some((o) => o.minutes === opts.hibernateAfterMinutes)
+    ? HIBERNATE_OPTIONS
+    : [...HIBERNATE_OPTIONS, { minutes: opts.hibernateAfterMinutes, label: `${opts.hibernateAfterMinutes} minutes` }].sort(
+        (a, b) => a.minutes - b.minutes,
+      );
 
   const url = normalizeUrl(address);
   const siteInfo = site.status === "done" && site.url === url ? site.info : null;
@@ -138,16 +168,20 @@ export function AddAppModal({ onSubmit, onClose }: Props) {
     iconFromFile(file).then(setCustomIcon, (e) => setIconError(message(e)));
   };
 
-  const submit = async () => {
-    if (!url || submitting) return;
+  /** Run `op` with the form locked; a rejection unlocks it and is shown. */
+  const busy = async (op: () => Promise<void>) => {
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit({ ...opts, name: name.trim() || fallbackName, url, icon });
+      await op();
     } catch (e) {
       setError(message(e));
       setSubmitting(false);
     }
+  };
+  const submit = async () => {
+    if (!url || submitting) return;
+    await busy(() => onSubmit({ ...opts, name: name.trim() || fallbackName, url, icon }));
   };
 
   let iconStatus: string;
@@ -171,7 +205,7 @@ export function AddAppModal({ onSubmit, onClose }: Props) {
         }}
       >
         <header className="modal-header">
-          <h2 id={titleId}>Add app</h2>
+          <h2 id={titleId}>{title}</h2>
           <button type="button" className="icon-button" aria-label="Close" onClick={onClose} disabled={submitting}>
             ×
           </button>
@@ -255,7 +289,7 @@ export function AddAppModal({ onSubmit, onClose }: Props) {
                 disabled={!opts.hibernation}
                 onChange={(e) => set("hibernateAfterMinutes")(Number(e.target.value))}
               >
-                {HIBERNATE_OPTIONS.map((o) => (
+                {hibernateOptions.map((o) => (
                   <option key={o.minutes} value={o.minutes}>
                     {o.label}
                   </option>
@@ -273,12 +307,36 @@ export function AddAppModal({ onSubmit, onClose }: Props) {
 
         <footer className="modal-footer">
           {error && <p className="field-error">{error}</p>}
-          <button type="button" className="button" onClick={onClose} disabled={submitting}>
-            Cancel
-          </button>
-          <button type="submit" className="button primary" disabled={!url || submitting}>
-            {submitting ? "Adding…" : "Add app"}
-          </button>
+          {service && onRemove && confirmingRemove ? (
+            <>
+              <p className="confirm">Are you sure you want to remove {service.name}?</p>
+              <button type="button" className="button" onClick={() => setConfirmingRemove(false)} disabled={submitting}>
+                Cancel
+              </button>
+              <button type="button" className="button danger" onClick={() => void busy(onRemove)} disabled={submitting}>
+                {submitting ? "Removing…" : "Remove"}
+              </button>
+            </>
+          ) : (
+            <>
+              {service && onRemove && (
+                <button
+                  type="button"
+                  className="button danger start"
+                  onClick={() => setConfirmingRemove(true)}
+                  disabled={submitting}
+                >
+                  Delete
+                </button>
+              )}
+              <button type="button" className="button" onClick={onClose} disabled={submitting}>
+                Cancel
+              </button>
+              <button type="submit" className="button primary" disabled={!url || submitting}>
+                {service ? (submitting ? "Saving…" : "Save") : submitting ? "Adding…" : "Add app"}
+              </button>
+            </>
+          )}
         </footer>
       </form>
     </div>

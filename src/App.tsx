@@ -1,18 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import { AddAppModal } from "./components/AddAppModal";
+import { AppModal } from "./components/AppModal";
+import { showServiceMenu } from "./components/serviceMenu";
 import { Sidebar } from "./components/Sidebar";
 import {
   activateService,
   addService,
   getSettings,
+  goHome,
   listServices,
   onServicesChanged,
   openDevtools,
+  reloadService,
   removeService,
+  setAudio,
+  setEnabled,
   setKeepAlive,
+  setNotifications,
   setOverlay,
   setSettings,
   unloadService,
+  updateService,
 } from "./services/api";
 import type { CommandError, NewService, Service, Settings } from "./services/types";
 import "./App.css";
@@ -30,7 +37,8 @@ export default function App() {
   const [services, setServices] = useState<Service[]>([]);
   const [settings, setSettingsState] = useState<Settings | null>(null);
   const [error, setError] = useState<{ kind?: string; message: string } | null>(null);
-  const [adding, setAdding] = useState(false);
+  /** The app modal: "new" to add one, a service to edit it. */
+  const [modal, setModal] = useState<Service | "new" | null>(null);
 
   // State comes from "services-changed" events; invoke results only carry errors.
   const run = useCallback(async (op: Promise<void>) => {
@@ -65,16 +73,35 @@ export default function App() {
   // The modal is only rendered once the shell covers the window, and the
   // shell shrinks back only after it is gone, so it never shows squeezed
   // into the sidebar.
-  const openAdd = () => void run(setOverlay(true).then(() => setAdding(true)));
-  const closeAdd = useCallback(() => {
-    setAdding(false);
+  const openModal = (m: Service | "new") => void run(setOverlay(true).then(() => setModal(m)));
+  const closeModal = useCallback(() => {
+    setModal(null);
     void run(setOverlay(false));
   }, [run]);
   const submitAdd = async (service: NewService) => {
     const id = await addService(service);
-    closeAdd();
+    closeModal();
     if (service.enabled) await run(activateService(id));
   };
+  const submitEdit = (id: string) => async (service: NewService) => {
+    await updateService(id, service);
+    closeModal();
+  };
+  // Logins (the profile) are kept; the settings panel's "Remove service" can delete them.
+  const submitRemove = (id: string) => async () => {
+    await removeService(id, false);
+    closeModal();
+  };
+
+  const openMenu = (s: Service, anchor: DOMRect) =>
+    void showServiceMenu(s, anchor, {
+      home: () => void run(goHome(s.id)),
+      reload: () => void run(reloadService(s.id)),
+      setEnabled: (on) => void run(setEnabled(s.id, on)),
+      setAudio: (on) => void run(setAudio(s.id, on)),
+      setNotifications: (on) => void run(setNotifications(s.id, on)),
+      edit: () => openModal(s),
+    }).catch((e) => setError(toError(e)));
 
   return (
     <>
@@ -82,8 +109,9 @@ export default function App() {
         services={services}
         settings={settings}
         onSelect={(id) => void run(activateService(id))}
+        onMenu={openMenu}
         onUnload={(id) => void run(unloadService(id))}
-        onAdd={openAdd}
+        onAdd={() => openModal("new")}
         onRemove={(id, deleteProfile) => void run(removeService(id, deleteProfile))}
         onKeepAlive={(id, keepAlive) => void run(setKeepAlive(id, keepAlive))}
         onSettings={(next) => void run(setSettings(next).then(() => setSettingsState(next)))}
@@ -95,7 +123,16 @@ export default function App() {
           {error.message}
         </div>
       )}
-      {adding && <AddAppModal onSubmit={submitAdd} onClose={closeAdd} />}
+      {modal === "new" && <AppModal onSubmit={submitAdd} onClose={closeModal} />}
+      {modal && modal !== "new" && (
+        <AppModal
+          key={modal.id}
+          service={modal}
+          onSubmit={submitEdit(modal.id)}
+          onRemove={submitRemove(modal.id)}
+          onClose={closeModal}
+        />
+      )}
     </>
   );
 }

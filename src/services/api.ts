@@ -13,6 +13,16 @@ export const addService = (service: NewService) => invoke<string>("add_service",
 export const inspectSite = (url: string) => invoke<SiteInfo>("inspect_site", { url });
 /** Let the shell cover the whole window, above the service, while it shows a modal. */
 export const setOverlay = (open: boolean) => invoke<void>("set_overlay", { open });
+/** Save the "Edit app" form; a loaded service may be recreated (see webviews.rs). */
+export const updateService = (id: string, service: NewService) => invoke<void>("update_service", { id, service });
+/** These two act on a loaded service where it is, without switching to it. */
+export const goHome = (id: string) => invoke<void>("go_home", { id });
+export const reloadService = (id: string) => invoke<void>("reload_service", { id });
+/** Disabling unloads the service. */
+export const setEnabled = (id: string, enabled: boolean) => invoke<void>("set_enabled", { id, enabled });
+export const setAudio = (id: string, audio: boolean) => invoke<void>("set_audio", { id, audio });
+export const setNotifications = (id: string, notifications: boolean) =>
+  invoke<void>("set_notifications", { id, notifications });
 export const removeService = (id: string, deleteProfile: boolean) =>
   invoke<void>("remove_service", { id, deleteProfile });
 export const renameService = (id: string, name: string) => invoke<void>("rename_service", { id, name });

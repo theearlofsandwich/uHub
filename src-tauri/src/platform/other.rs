@@ -73,6 +73,13 @@ pub fn attach_service<R: Runtime, E: ServiceEvents>(
     place(webview, window_size(&webview.window())?)
 }
 
+pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result<()> {
+    if muted {
+        log::warn!("[{}] muting is not implemented on this platform", webview.label());
+    }
+    Ok(())
+}
+
 pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
     EXPANDED.store(open, Ordering::Relaxed);
     let window = shell.window();

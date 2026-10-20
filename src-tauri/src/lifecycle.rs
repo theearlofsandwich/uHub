@@ -111,6 +111,11 @@ impl<H> Registry<H> {
         }
     }
 
+    /// `id`'s webview, if it has one (even a crashed one).
+    pub fn handle(&self, id: &str) -> Option<&H> {
+        self.handles.get(id)
+    }
+
     pub fn active_handle(&self) -> Option<&H> {
         self.active.as_ref().and_then(|id| self.handles.get(id))
     }
@@ -131,9 +136,12 @@ impl<H> Registry<H> {
                 state: self.state(s.id()),
                 unread: self.unread.get(s.id()).copied().unwrap_or(0),
                 keep_alive: s.keep_alive(),
+                hibernate_after_minutes: s.instance.hibernate_after_minutes,
+                notifications: s.instance.permissions.notifications,
                 audio: s.instance.audio,
                 media_indicator: s.instance.media_indicator,
                 unread_badge: s.instance.unread_badge,
+                open_links_inside: s.instance.open_links_inside,
                 playing_audio: self.playing.contains(s.id()),
             })
             .collect()

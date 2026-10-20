@@ -100,6 +100,11 @@ pub fn attach_service<R: Runtime, E: ServiceEvents>(
     imp::attach_service(webview, events, muted)
 }
 
+/// Mute or unmute a live service webview.
+pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result<()> {
+    imp::set_muted(webview, muted)
+}
+
 /// Let the shell cover the whole window, above the service (`open`, while it
 /// shows a modal), or go back to being the sidebar.
 pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {

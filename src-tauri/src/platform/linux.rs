@@ -37,6 +37,10 @@ pub fn attach_service<R: Runtime, E: ServiceEvents>(
     })
 }
 
+pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result<()> {
+    webview.with_webview(move |pw| pw.inner().set_is_muted(muted))
+}
+
 pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
     shell.with_webview(move |pw| layout::set_expanded(&pw.inner(), open))
 }

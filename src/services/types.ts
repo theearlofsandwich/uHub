@@ -19,17 +19,23 @@ export interface Service {
   unread: number;
   /** Never hibernated: stays loaded in the background (e.g. for notifications). */
   keepAlive: boolean;
+  /** null: the app-wide `Settings.hibernate_after_minutes`. */
+  hibernateAfterMinutes: number | null;
+  /** The page may show (desktop) notifications. */
+  notifications: boolean;
   /** false: the webview is muted. */
   audio: boolean;
   /** Show `playingAudio` in the sidebar. */
   mediaIndicator: boolean;
   /** Show `unread` in the sidebar (and count it in the tray). */
   unreadBadge: boolean;
+  /** Off-site links open in a uHub window instead of the browser. */
+  openLinksInside: boolean;
   /** The page is playing audio right now (only reported on Linux). */
   playingAudio: boolean;
 }
 
-/** Mirrors `NewService` in src-tauri/src/services.rs: what "Add app" creates. */
+/** Mirrors `NewService` in src-tauri/src/services.rs: what "Add app" creates and "Edit app" saves. */
 export interface NewService {
   name: string;
   /** http(s); the recipe (WhatsApp, Gmail...) is picked from it. */

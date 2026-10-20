@@ -7,7 +7,9 @@
 //! is playing (media indicator), web notifications (sent on as desktop
 //! notifications) and permission requests (decided by the instance's policy,
 //! see `Service::allows`). Not every platform reports all of them, see
-//! platform/mod.rs.
+//! platform/mod.rs. Sound and notifications can be switched while the page is
+//! loaded; any other change to how a service's webview is built (its URL,
+//! say) recreates it.
 //!
 //! Hibernation: a background task unloads SUSPENDED services that aren't kept
 //! alive once they have been idle longer than their own or the app-wide limit,
@@ -15,7 +17,8 @@
 //! switch so it can't race one.
 //!
 //! Also hosts the commands that edit the service configuration and settings
-//! (services.rs), and the ones behind the shell's "Add app" modal.
+//! (services.rs), the ones behind the shell's "Add app" and "Edit app" modals,
+//! and those of a service's context menu (go home, reload).
 //!
 //! Every change is pushed to the shell as a "services-changed" event carrying
 //! the full snapshot, emitted while the registry lock is held so events arrive
@@ -27,13 +30,13 @@ use crate::{
     lifecycle::{Backend, Hibernate, Registry},
     navigation,
     platform::{self, ServiceEvents},
-    services::{self, Config, NewService, PermissionKind, RecipeInfo, Service, ServiceInfo, Settings},
+    services::{self, Config, Lifecycle, NewService, PermissionKind, RecipeInfo, Service, ServiceInfo, Settings},
     tray,
 };
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -76,10 +79,12 @@ impl Services {
 }
 
 /// A service webview plus a per-creation number, so a crash report about a
-/// webview that has since been destroyed (and its label reused) is ignored.
+/// webview that has since been destroyed (and its label reused) is ignored,
+/// and its event receiver, which holds the settings that apply live.
 pub struct SvcWebview<R: Runtime = Wry> {
     webview: Webview<R>,
     generation: u64,
+    events: Arc<Reporter<R>>,
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -174,10 +179,10 @@ fn on_show_notification<R: Runtime>(app: &AppHandle<R>, id: String, title: Strin
 }
 
 /// Main thread (permission request): decided synchronously from the policy
-/// captured at creation (services.json is only read at startup).
-fn on_permission_request(svc: &Service, kind: PermissionKind) -> bool {
-    let allowed = svc.allows(kind);
-    log::info!("[{}] permission {kind:?}: {}", svc.id(), if allowed { "allowed" } else { "denied" });
+/// captured at creation, as updated since (see `Reporter::allows`).
+fn on_permission_request<R: Runtime>(events: &Reporter<R>, kind: PermissionKind) -> bool {
+    let allowed = events.allows(kind);
+    log::info!("[{}] permission {kind:?}: {}", events.svc.id(), if allowed { "allowed" } else { "denied" });
     allowed
 }
 
@@ -188,6 +193,17 @@ struct Reporter<R: Runtime> {
     generation: u64,
     /// The unread count last handed off, so only changes are.
     last_unread: std::sync::Mutex<Option<u32>>,
+    /// `svc`'s notification permission, switchable while the page is loaded.
+    notifications: AtomicBool,
+}
+
+impl<R: Runtime> Reporter<R> {
+    fn allows(&self, kind: PermissionKind) -> bool {
+        match kind {
+            PermissionKind::Notifications => self.notifications.load(Ordering::Relaxed),
+            _ => self.svc.allows(kind),
+        }
+    }
 }
 
 impl<R: Runtime> ServiceEvents for Reporter<R> {
@@ -210,13 +226,13 @@ impl<R: Runtime> ServiceEvents for Reporter<R> {
 
     fn notification(&self, title: String, body: String) {
         // The permission was denied, so the page shouldn't get here; if it does, drop it.
-        if self.svc.allows(PermissionKind::Notifications) {
+        if self.allows(PermissionKind::Notifications) {
             on_show_notification(&self.app, self.svc.id().to_owned(), title, body);
         }
     }
 
     fn permission(&self, kind: PermissionKind) -> bool {
-        on_permission_request(&self.svc, kind)
+        on_permission_request(self, kind)
     }
 
     fn watches_audio(&self) -> bool {
@@ -238,7 +254,13 @@ fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>
     let url = svc.url().parse().map_err(|e| Error::CreateFailed(format!("bad url: {e}")))?;
     let log_id = id.clone();
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    let events = Arc::new(Reporter { app: app.clone(), svc: svc.clone(), generation, last_unread: Default::default() });
+    let events = Arc::new(Reporter {
+        app: app.clone(),
+        svc: svc.clone(),
+        generation,
+        last_unread: Default::default(),
+        notifications: AtomicBool::new(svc.allows(PermissionKind::Notifications)),
+    });
     let links_inside = svc.instance.open_links_inside.then(|| data_dir.clone());
     let mut builder = WebviewBuilder::new(label(&id), WebviewUrl::External(url))
         // Distinct directory => distinct WebKit WebContext + WebsiteDataManager.
@@ -262,14 +284,14 @@ fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>
         .add_child(builder, LogicalPosition::new(0., 0.), LogicalSize::new(1., 1.))
         .map_err(|e| Error::CreateFailed(format!("add_child failed: {e}")))?;
     // From here on the label is taken: don't leak the webview on failure.
-    if let Err(e) = platform::attach_service(&webview, events, !svc.instance.audio) {
+    if let Err(e) = platform::attach_service(&webview, events.clone(), !svc.instance.audio) {
         log::error!("[{id}] placing webview failed, closing it: {e}");
         if let Err(e) = webview.close() {
             log::error!("[{id}] close failed: {e}");
         }
         return Err(Error::CreateFailed(e.to_string()));
     }
-    Ok(SvcWebview { webview, generation })
+    Ok(SvcWebview { webview, generation, events })
 }
 
 /// Real webviews: suspend = hide(), resume = show(), unload = close().
@@ -338,6 +360,42 @@ async fn activate(app: &AppHandle, id: &str) -> Result<()> {
     hibernate(app, inner);
     emit_snapshot(app, inner);
     result
+}
+
+/// `act` on `id`'s page where it is, on screen or in the background, without
+/// switching to it. A no-op unless the page is loaded (and its process alive):
+/// an unloaded service starts at home anyway.
+async fn with_page(
+    state: State<'_, Services>,
+    id: &str,
+    act: impl FnOnce(&Webview, &Service) -> Result<()>,
+) -> Result<()> {
+    let inner = state.0.lock().await;
+    let svc = inner.config.find(id).ok_or_else(|| services::unknown(id))?;
+    match (inner.reg.state(id), inner.reg.handle(id)) {
+        (Lifecycle::Active | Lifecycle::Suspended, Some(wv)) => act(&wv.webview, svc),
+        _ => Ok(()),
+    }
+}
+
+/// Send `id`'s page back to its home URL.
+#[tauri::command]
+pub async fn go_home(state: State<'_, Services>, id: String) -> Result<()> {
+    with_page(state, &id, |webview, svc| {
+        let url = svc.url().parse().map_err(|e| Error::invalid(format!("bad url: {e}")))?;
+        log::info!("[{id}] going home");
+        Ok(webview.navigate(url)?)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn reload_service(state: State<'_, Services>, id: String) -> Result<()> {
+    with_page(state, &id, |webview, _| {
+        log::info!("[{id}] reloading");
+        Ok(webview.reload()?)
+    })
+    .await
 }
 
 /// How often idle services are looked for.
@@ -553,6 +611,98 @@ pub async fn set_keep_alive(
     let mut inner = state.0.lock().await;
     inner.config.set_keep_alive(&id, keep_alive)?;
     emit_snapshot(&app, &inner);
+    Ok(())
+}
+
+/// Disabling unloads the service; enabling doesn't load it.
+#[tauri::command]
+pub async fn set_enabled(app: AppHandle, state: State<'_, Services>, id: String, enabled: bool) -> Result<()> {
+    let mut guard = state.0.lock().await;
+    let inner = &mut *guard;
+    let result = set_enabled_in(&app, inner, &id, enabled);
+    emit_snapshot(&app, inner);
+    result
+}
+
+fn set_enabled_in(app: &AppHandle, inner: &mut Inner, id: &str, enabled: bool) -> Result<()> {
+    if !enabled {
+        inner.reg.unload(&Webviews(app), id)?;
+    }
+    inner.config.set_enabled(id, enabled)
+}
+
+/// Takes effect right away if the service is loaded.
+#[tauri::command]
+pub async fn set_audio(app: AppHandle, state: State<'_, Services>, id: String, audio: bool) -> Result<()> {
+    let mut inner = state.0.lock().await;
+    inner.config.set_audio(&id, audio)?;
+    emit_snapshot(&app, &inner);
+    match inner.reg.handle(&id) {
+        Some(wv) => Ok(platform::set_muted(&wv.webview, !audio)?),
+        None => Ok(()),
+    }
+}
+
+/// Takes effect right away if the service is loaded, though a page that
+/// already asked for the permission and was denied may need a reload to ask
+/// again.
+#[tauri::command]
+pub async fn set_notifications(
+    app: AppHandle,
+    state: State<'_, Services>,
+    id: String,
+    notifications: bool,
+) -> Result<()> {
+    let mut inner = state.0.lock().await;
+    inner.config.set_notifications(&id, notifications)?;
+    if let Some(wv) = inner.reg.handle(&id) {
+        wv.events.notifications.store(notifications, Ordering::Relaxed);
+    }
+    emit_snapshot(&app, &inner);
+    Ok(())
+}
+
+/// Save the "Edit app" form. A loaded service applies sound and notifications
+/// in place; if anything else its webview is built from changed, the webview
+/// is recreated (or just unloaded, if it was in the background).
+#[tauri::command]
+pub async fn update_service(
+    app: AppHandle,
+    state: State<'_, Services>,
+    id: String,
+    service: NewService,
+) -> Result<()> {
+    let mut guard = state.0.lock().await;
+    let inner = &mut *guard;
+    let old = inner.config.find(&id).ok_or_else(|| services::unknown(&id))?.clone();
+    inner.config.update(&id, &service)?;
+    log::info!("[{id}] updated ({})", service.url);
+    let result = refresh(&app, inner, &old);
+    emit_snapshot(&app, inner);
+    result
+}
+
+/// Bring `old`'s webview, if it has one, in line with its updated config.
+fn refresh(app: &AppHandle, inner: &mut Inner, old: &Service) -> Result<()> {
+    let id = old.id();
+    let Some(wv) = inner.reg.handle(id) else { return Ok(()) };
+    let new = inner.config.find(id).ok_or_else(|| services::unknown(id))?.clone();
+    if !new.instance.enabled {
+        return inner.reg.unload(&Webviews(app), id);
+    }
+    fn rebuilt(s: &Service) -> (&str, &str, &[String], bool, bool) {
+        (s.recipe.id, s.url(), s.allowed_domains(), s.instance.media_indicator, s.instance.open_links_inside)
+    }
+    if rebuilt(old) == rebuilt(&new) {
+        wv.events.notifications.store(new.allows(PermissionKind::Notifications), Ordering::Relaxed);
+        return Ok(platform::set_muted(&wv.webview, !new.instance.audio)?);
+    }
+    let was_active = inner.reg.state(id) == Lifecycle::Active;
+    log::info!("[{id}] recreating webview for the new settings");
+    inner.reg.unload(&Webviews(app), id)?;
+    if was_active {
+        inner.reg.activate(&Webviews(app), &new)?;
+    }
     Ok(())
 }
 
