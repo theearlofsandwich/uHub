@@ -76,6 +76,12 @@ impl Services {
     pub fn close_to_tray(&mut self) -> bool {
         self.0.get_mut().config.settings().close_to_tray
     }
+
+    /// Before it is shared: where the shell is placed.
+    pub fn bar(&mut self) -> platform::Bar {
+        let settings = self.0.get_mut().config.settings();
+        platform::Bar::new(settings.bar_position, settings.icon_size)
+    }
 }
 
 /// A service webview plus a per-creation number, so a crash report about a
@@ -720,7 +726,12 @@ pub async fn set_settings(
     let mut guard = state.0.lock().await;
     let inner = &mut *guard;
     inner.config.set_settings(settings)?;
-    tray::set_close_to_tray(&app, inner.config.settings().close_to_tray);
+    let settings = inner.config.settings();
+    tray::set_close_to_tray(&app, settings.close_to_tray);
+    let bar = platform::Bar::new(settings.bar_position, settings.icon_size);
+    if bar != platform::bar() {
+        platform::set_bar(bar, app.get_webview("shell").as_ref())?;
+    }
     // A shorter limit or a lower cap applies right away.
     if hibernate(&app, inner) {
         emit_snapshot(&app, inner);

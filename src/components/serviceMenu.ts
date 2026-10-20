@@ -1,6 +1,7 @@
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
-import type { Service } from "../services/types";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { BarPosition, Service } from "../services/types";
 
 export interface ServiceMenuActions {
   home: () => void;
@@ -15,11 +16,17 @@ export interface ServiceMenuActions {
 let shown: { close: () => Promise<void> }[] = [];
 
 /**
- * A service's right-click menu, dropped down from `anchor` (its sidebar row)
- * rather than at the pointer. Native rather than HTML: it has to float over
- * the service webview, which the sidebar-sized shell can't draw over.
+ * A service's right-click menu, dropped down from `anchor` (its item in the
+ * app bar) rather than at the pointer. Native rather than HTML: it has to
+ * float over the service webview, which the bar-sized shell can't draw over.
+ * `position` is the bar's, to place `anchor` in the window.
  */
-export async function showServiceMenu(s: Service, anchor: DOMRect, actions: ServiceMenuActions) {
+export async function showServiceMenu(
+  s: Service,
+  anchor: DOMRect,
+  actions: ServiceMenuActions,
+  position: BarPosition,
+) {
   for (const r of shown) void r.close();
   // Only a loaded page can be sent home or reloaded.
   const loaded = s.state === "active" || s.state === "suspended";
@@ -39,6 +46,14 @@ export async function showServiceMenu(s: Service, anchor: DOMRect, actions: Serv
   ]);
   const menu = await Menu.new({ items });
   shown = [menu, ...items];
-  // The shell sits at the window's top-left, so its coordinates are the window's.
-  await menu.popup(new LogicalPosition(anchor.left, anchor.bottom));
+  // The shell's coordinates are the window's, except that a right or bottom
+  // bar is offset by the rest of the window.
+  let [dx, dy] = [0, 0];
+  if (position === "right" || position === "bottom") {
+    const win = getCurrentWindow();
+    const size = (await win.innerSize()).toLogical(await win.scaleFactor());
+    if (position === "right") dx = size.width - window.innerWidth;
+    else dy = size.height - window.innerHeight;
+  }
+  await menu.popup(new LogicalPosition(anchor.left + dx, anchor.bottom + dy));
 }

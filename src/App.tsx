@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppModal } from "./components/AppModal";
+import { SettingsModal } from "./components/SettingsModal";
 import { showServiceMenu } from "./components/serviceMenu";
 import { Sidebar } from "./components/Sidebar";
 import {
@@ -9,16 +10,13 @@ import {
   goHome,
   listServices,
   onServicesChanged,
-  openDevtools,
   reloadService,
   removeService,
   setAudio,
   setEnabled,
-  setKeepAlive,
   setNotifications,
   setOverlay,
-  setSettings,
-  unloadService,
+  setSettings as saveSettings,
   updateService,
 } from "./services/api";
 import type { CommandError, NewService, Service, Settings } from "./services/types";
@@ -35,10 +33,12 @@ function toError(e: unknown): { kind?: string; message: string } {
 
 export default function App() {
   const [services, setServices] = useState<Service[]>([]);
-  const [settings, setSettingsState] = useState<Settings | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  /** What Rust last saved; `settings` may be ahead of it while a slider is dragged. */
+  const savedSettings = useRef<Settings | null>(null);
   const [error, setError] = useState<{ kind?: string; message: string } | null>(null);
-  /** The app modal: "new" to add one, a service to edit it. */
-  const [modal, setModal] = useState<Service | "new" | null>(null);
+  /** The open modal: "new" adds an app, a service edits it. */
+  const [modal, setModal] = useState<Service | "new" | "settings" | null>(null);
 
   // State comes from "services-changed" events; invoke results only carry errors.
   const run = useCallback(async (op: Promise<void>) => {
@@ -64,16 +64,36 @@ export default function App() {
         if (!gotEvent) setServices(s);
       })
       .catch((e) => setError(toError(e)));
-    getSettings()
-      .then(setSettingsState)
-      .catch((e) => setError(toError(e)));
     return () => void unlisten.then((f) => f());
   }, []);
 
+  useEffect(() => {
+    getSettings()
+      .then((s) => {
+        savedSettings.current = s;
+        setSettings(s);
+      })
+      .catch((e) => setError(toError(e)));
+  }, []);
+
+  // Shown before Rust has saved it (and moved the bar's webview), so the
+  // change is immediate; the modal covers the window meanwhile. A failed save
+  // goes back to what was saved, dropping any unsaved preview too.
+  const changeSettings = async (next: Settings) => {
+    setSettings(next);
+    try {
+      await saveSettings(next);
+      savedSettings.current = next;
+    } catch (e) {
+      setSettings(savedSettings.current);
+      throw e;
+    }
+  };
+
   // The modal is only rendered once the shell covers the window, and the
   // shell shrinks back only after it is gone, so it never shows squeezed
-  // into the sidebar.
-  const openModal = (m: Service | "new") => void run(setOverlay(true).then(() => setModal(m)));
+  // into the bar.
+  const openModal = (m: Service | "new" | "settings") => void run(setOverlay(true).then(() => setModal(m)));
   const closeModal = useCallback(() => {
     setModal(null);
     void run(setOverlay(false));
@@ -87,44 +107,48 @@ export default function App() {
     await updateService(id, service);
     closeModal();
   };
-  // Logins (the profile) are kept; the settings panel's "Remove service" can delete them.
-  const submitRemove = (id: string) => async () => {
-    await removeService(id, false);
+  const submitRemove = (id: string) => async (deleteProfile: boolean) => {
+    await removeService(id, deleteProfile);
     closeModal();
   };
 
+  const position = settings?.bar_position ?? "left";
   const openMenu = (s: Service, anchor: DOMRect) =>
-    void showServiceMenu(s, anchor, {
-      home: () => void run(goHome(s.id)),
-      reload: () => void run(reloadService(s.id)),
-      setEnabled: (on) => void run(setEnabled(s.id, on)),
-      setAudio: (on) => void run(setAudio(s.id, on)),
-      setNotifications: (on) => void run(setNotifications(s.id, on)),
-      edit: () => openModal(s),
-    }).catch((e) => setError(toError(e)));
+    void showServiceMenu(
+      s,
+      anchor,
+      {
+        home: () => void run(goHome(s.id)),
+        reload: () => void run(reloadService(s.id)),
+        setEnabled: (on) => void run(setEnabled(s.id, on)),
+        setAudio: (on) => void run(setAudio(s.id, on)),
+        setNotifications: (on) => void run(setNotifications(s.id, on)),
+        edit: () => openModal(s),
+      },
+      position,
+    ).catch((e) => setError(toError(e)));
 
   return (
     <>
-      <Sidebar
-        services={services}
-        settings={settings}
-        onSelect={(id) => void run(activateService(id))}
-        onMenu={openMenu}
-        onUnload={(id) => void run(unloadService(id))}
-        onAdd={() => openModal("new")}
-        onRemove={(id, deleteProfile) => void run(removeService(id, deleteProfile))}
-        onKeepAlive={(id, keepAlive) => void run(setKeepAlive(id, keepAlive))}
-        onSettings={(next) => void run(setSettings(next).then(() => setSettingsState(next)))}
-        onDevtools={() => void openDevtools()}
-      />
-      {error && (
-        <div className="error">
-          {import.meta.env.DEV && error.kind && <code className="error-kind">{error.kind}</code>}
-          {error.message}
-        </div>
+      {/* Not before the settings: Rust may have already put the bar on another edge. */}
+      {(settings || error) && (
+        <Sidebar
+          services={services}
+          position={position}
+          labels={settings?.bar_labels ?? false}
+          iconSize={settings?.icon_size ?? "medium"}
+          spacing={settings?.icon_spacing ?? 2}
+          error={error}
+          onDismissError={() => setError(null)}
+          onSelect={(id) => void run(activateService(id))}
+          onMenu={openMenu}
+          onAdd={() => openModal("new")}
+          onSettings={() => openModal("settings")}
+        />
       )}
       {modal === "new" && <AppModal onSubmit={submitAdd} onClose={closeModal} />}
-      {modal && modal !== "new" && (
+      {modal === "settings" && <SettingsModal settings={settings} onPreview={setSettings} onChange={changeSettings} onClose={closeModal} />}
+      {typeof modal === "object" && modal !== null && (
         <AppModal
           key={modal.id}
           service={modal}

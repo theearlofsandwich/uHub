@@ -239,6 +239,66 @@ pub struct Settings {
     /// Closing the window hides it to the tray instead of quitting.
     #[serde(default = "yes")]
     pub close_to_tray: bool,
+    /// The window edge the app bar sits on.
+    #[serde(default, deserialize_with = "or_default")]
+    pub bar_position: BarPosition,
+    /// Show app names next to their icons; only a top or bottom bar has room.
+    #[serde(default)]
+    pub bar_labels: bool,
+    #[serde(default, deserialize_with = "or_default")]
+    pub icon_size: IconSize,
+    /// The gap between the bar's icons, in logical pixels.
+    #[serde(default = "default_icon_spacing")]
+    pub icon_spacing: u32,
+}
+
+/// Largest `Settings::icon_spacing`; the shell's slider stops here too.
+const MAX_ICON_SPACING: u32 = 16;
+
+fn default_icon_spacing() -> u32 {
+    2
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BarPosition {
+    #[default]
+    Left,
+    Top,
+    Bottom,
+    Right,
+}
+
+impl BarPosition {
+    /// Top or bottom: the bar spans the window's width.
+    pub fn is_horizontal(self) -> bool {
+        matches!(self, Self::Top | Self::Bottom)
+    }
+}
+
+/// The size of the app icons in the bar, which sets its thickness (see
+/// `platform::bar_thickness`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum IconSize {
+    ExtraSmall,
+    Small,
+    #[default]
+    Medium,
+    Large,
+    ExtraLarge,
+}
+
+/// An unknown value (a hand-edited file, or one from a newer version) is
+/// the default rather than an unreadable services.json.
+fn or_default<'de, D: serde::Deserializer<'de>, T: Default + serde::de::DeserializeOwned>(
+    d: D,
+) -> std::result::Result<T, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(T::deserialize(value).unwrap_or_else(|e| {
+        log::warn!("services.json: using the default for a setting: {e}");
+        T::default()
+    }))
 }
 
 fn default_hibernate_after() -> u32 {
@@ -247,7 +307,15 @@ fn default_hibernate_after() -> u32 {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { hibernate_after_minutes: default_hibernate_after(), max_suspended: None, close_to_tray: true }
+        Self {
+            hibernate_after_minutes: default_hibernate_after(),
+            max_suspended: None,
+            close_to_tray: true,
+            bar_position: BarPosition::default(),
+            bar_labels: false,
+            icon_size: IconSize::default(),
+            icon_spacing: default_icon_spacing(),
+        }
     }
 }
 
@@ -258,6 +326,9 @@ impl Settings {
         }
         if self.max_suspended.is_some_and(|n| n > 100) {
             return Err(Error::invalid("background limit must be at most 100"));
+        }
+        if self.icon_spacing > MAX_ICON_SPACING {
+            return Err(Error::invalid(format!("icon spacing must be at most {MAX_ICON_SPACING}px")));
         }
         Ok(())
     }
@@ -1091,10 +1162,19 @@ mod tests {
         assert_eq!(c.settings().hibernate_after_minutes, 15);
         assert_eq!(c.last_active(), None);
 
-        let s = Settings { hibernate_after_minutes: 30, max_suspended: Some(2), close_to_tray: false };
+        let s = Settings {
+            hibernate_after_minutes: 30,
+            max_suspended: Some(2),
+            close_to_tray: false,
+            bar_position: BarPosition::Bottom,
+            bar_labels: true,
+            icon_size: IconSize::Large,
+            icon_spacing: 8,
+        };
         c.set_settings(s.clone()).unwrap();
         assert!(c.set_settings(Settings { max_suspended: Some(1000), ..s.clone() }).is_err());
         assert!(c.set_settings(Settings { hibernate_after_minutes: u32::MAX, ..s.clone() }).is_err());
+        assert!(c.set_settings(Settings { icon_spacing: 100, ..s.clone() }).is_err());
         c.set_last_active("gmail-work").unwrap();
         assert!(c.set_last_active("nope").is_err());
 
@@ -1126,7 +1206,14 @@ mod tests {
         let saved = parse(json).unwrap();
         assert_eq!(saved.settings.hibernate_after_minutes, 0);
         assert!(saved.settings.close_to_tray, "missing field: its default");
+        assert_eq!(saved.settings.bar_position, BarPosition::Left);
         assert_eq!(saved.last_active.as_deref(), Some("a"));
+
+        let json = r#"{"version":1,"services":[{"id":"a","name":"A","recipe":"gmail","profile":"a"}],
+            "settings":{"bar_position":"diagonal","icon_size":"extra-large"}}"#;
+        let saved = parse(json).unwrap();
+        assert_eq!(saved.settings.bar_position, BarPosition::Left, "unknown value: its default");
+        assert_eq!(saved.settings.icon_size, IconSize::ExtraLarge);
     }
 
     #[test]

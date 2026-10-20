@@ -51,6 +51,7 @@ pub fn run() {
             let config_path = app.path().app_config_dir()?.join("services.json");
             let mut services = webviews::Services::load(config_path)?;
             let close_to_tray = services.close_to_tray();
+            platform::set_bar::<tauri::Wry>(services.bar(), None)?;
             app.manage(services);
             webviews::activate_on_notification_click(app.handle())?;
             // Without a tray (e.g. no appindicator library), closing the window quits.
@@ -66,7 +67,7 @@ pub fn run() {
 
             // The trusted React shell: the only webview that gets IPC (see capabilities/default.json).
             // Transparent, so a service shows through while the shell covers it
-            // with a modal (platform::set_overlay); the sidebar paints its own
+            // with a modal (platform::set_overlay); the bar paints its own
             // background. No native drag-and-drop handler, so the page gets
             // HTML5 drops (custom app icons).
             let shell = WebviewBuilder::new("shell", WebviewUrl::App("index.html".into()))
@@ -80,11 +81,10 @@ pub fn run() {
                     ok
                 })
                 .devtools(cfg!(debug_assertions));
-            let shell = window.add_child(
-                shell,
-                LogicalPosition::new(0., 0.),
-                LogicalSize::new(f64::from(platform::SIDEBAR_WIDTH), 800.),
-            )?;
+            // Placed by platform::place_shell.
+            let (x, y, width, height) = platform::bar().rect(1280., 800.);
+            let shell =
+                window.add_child(shell, LogicalPosition::new(x, y), LogicalSize::new(width, height))?;
             platform::place_shell(&shell)?;
             webviews::spawn_hibernation(app.handle());
             webviews::restore_last_active(app.handle());

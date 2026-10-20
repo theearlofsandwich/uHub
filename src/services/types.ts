@@ -68,7 +68,17 @@ export interface Settings {
   max_suspended: number | null;
   /** Closing the window hides it to the tray instead of quitting. */
   close_to_tray: boolean;
+  /** The window edge the app bar sits on. */
+  bar_position: BarPosition;
+  /** App names next to their icons; only used by a top or bottom bar. */
+  bar_labels: boolean;
+  icon_size: IconSize;
+  /** Gap between the bar's icons in px, 0 to 16 (MAX_ICON_SPACING in services.rs). */
+  icon_spacing: number;
 }
+
+export type BarPosition = "left" | "top" | "bottom" | "right";
+export type IconSize = "extra-small" | "small" | "medium" | "large" | "extra-large";
 
 /** Mirrors `RecipeInfo` in src-tauri/src/services.rs: a site services can be created from. */
 export interface Recipe {

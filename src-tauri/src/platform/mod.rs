@@ -47,14 +47,67 @@ mod other;
 #[cfg(not(target_os = "linux"))]
 use other as imp;
 
-use crate::services::PermissionKind;
-use std::sync::Arc;
+use crate::services::{BarPosition, IconSize, PermissionKind};
+use std::sync::{Arc, Mutex};
 use tauri::{webview::WebviewBuilder, Runtime, Webview, Window, WindowEvent};
 
-/// Width of the shell (sidebar) webview in logical pixels. The shell's CSS
-/// repeats it as `--sidebar-width` (src/App.css), for when the shell covers the
-/// whole window (`set_overlay`).
-pub const SIDEBAR_WIDTH: i32 = 220;
+/// Where the shell (the app bar) sits: the window edge and its thickness in
+/// logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bar {
+    pub position: BarPosition,
+    pub thickness: i32,
+}
+
+impl Bar {
+    pub fn new(position: BarPosition, icon_size: IconSize) -> Self {
+        Self { position, thickness: bar_thickness(icon_size) }
+    }
+
+    /// The bar's (x, y, width, height) in a window of `width` x `height`,
+    /// clamped to it.
+    pub fn rect(self, width: f64, height: f64) -> (f64, f64, f64, f64) {
+        let t = f64::from(self.thickness);
+        match self.position {
+            BarPosition::Left => (0., 0., t.min(width), height),
+            BarPosition::Right => ((width - t).max(0.), 0., t.min(width), height),
+            BarPosition::Top => (0., 0., width, t.min(height)),
+            BarPosition::Bottom => (0., (height - t).max(0.), width, t.min(height)),
+        }
+    }
+}
+
+/// The bar's thickness for icons of `size`: the icon plus the item's and the
+/// bar's padding. The shell's CSS computes the same as `--bar-size`
+/// (src/App.css), for when it covers the whole window (`set_overlay`).
+fn bar_thickness(size: IconSize) -> i32 {
+    let icon = match size {
+        IconSize::ExtraSmall => 16,
+        IconSize::Small => 20,
+        IconSize::Medium => 28,
+        IconSize::Large => 36,
+        IconSize::ExtraLarge => 44,
+    };
+    icon + 2 * 8 + 2 * 6
+}
+
+static BAR: Mutex<Bar> = Mutex::new(Bar { position: BarPosition::Left, thickness: 56 });
+
+/// The current bar layout (`set_bar`).
+pub fn bar() -> Bar {
+    *BAR.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Move or resize the bar. Before the shell exists (at startup) this only
+/// records where `place_shell` puts it; afterwards pass the shell to lay out
+/// the window again.
+pub fn set_bar<R: Runtime>(bar: Bar, shell: Option<&Webview<R>>) -> tauri::Result<()> {
+    *BAR.lock().unwrap_or_else(|e| e.into_inner()) = bar;
+    match shell {
+        Some(shell) => imp::relayout(shell),
+        None => Ok(()),
+    }
+}
 
 /// What a service webview reports through native events. All methods are
 /// called on the main thread, so they must not wait for the registry lock.
@@ -77,7 +130,7 @@ pub trait ServiceEvents: Send + Sync + 'static {
     fn playing_audio(&self, playing: bool);
 }
 
-/// Lay out the shell as the sidebar, at the window's left edge.
+/// Lay out the shell as the app bar, at the edge `set_bar` chose.
 pub fn place_shell<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
     imp::place_shell(shell)
 }
@@ -90,7 +143,7 @@ pub fn service_builder<R: Runtime, E: ServiceEvents>(
     imp::service_builder(builder, events)
 }
 
-/// Lay out a just-created service webview right of the sidebar, mute it if
+/// Lay out a just-created service webview beside the bar, mute it if
 /// `muted`, and connect the event hooks that need the native webview.
 pub fn attach_service<R: Runtime, E: ServiceEvents>(
     webview: &Webview<R>,
@@ -106,7 +159,7 @@ pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result
 }
 
 /// Let the shell cover the whole window, above the service (`open`, while it
-/// shows a modal), or go back to being the sidebar.
+/// shows a modal), or go back to being the bar.
 pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
     imp::set_overlay(shell, open)
 }

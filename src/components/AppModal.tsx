@@ -7,8 +7,8 @@ interface Props {
   service?: Service;
   /** Rejects with a `CommandError` (or anything) to keep the modal open and show it. */
   onSubmit: (service: NewService) => Promise<void>;
-  /** Editing only: remove the app. Rejects like `onSubmit`. */
-  onRemove?: () => Promise<void>;
+  /** Editing only: remove the app, and with `deleteProfile` its login data. Rejects like `onSubmit`. */
+  onRemove?: (deleteProfile: boolean) => Promise<void>;
   onClose: () => void;
 }
 
@@ -120,6 +120,7 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
   const [site, setSite] = useState<Site>({ status: "idle" });
   const [submitting, setSubmitting] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [deleteProfile, setDeleteProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleId = useId();
   const title = service ? "Edit app" : "Add app";
@@ -310,10 +311,35 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
           {service && onRemove && confirmingRemove ? (
             <>
               <p className="confirm">Are you sure you want to remove {service.name}?</p>
-              <button type="button" className="button" onClick={() => setConfirmingRemove(false)} disabled={submitting}>
+              <label className="confirm-check">
+                <input
+                  type="checkbox"
+                  checked={deleteProfile}
+                  disabled={submitting}
+                  onChange={(e) => setDeleteProfile(e.target.checked)}
+                />
+                <span>
+                  Also delete login data
+                  <small>Kept anyway if another app shares its profile ("{service.profile}")</small>
+                </span>
+              </label>
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  setConfirmingRemove(false);
+                  setDeleteProfile(false);
+                }}
+                disabled={submitting}
+              >
                 Cancel
               </button>
-              <button type="button" className="button danger" onClick={() => void busy(onRemove)} disabled={submitting}>
+              <button
+                type="button"
+                className="button danger"
+                onClick={() => void busy(() => onRemove(deleteProfile))}
+                disabled={submitting}
+              >
                 {submitting ? "Removing…" : "Remove"}
               </button>
             </>
@@ -383,7 +409,7 @@ function IconDrop({ icon, letter, onFile }: { icon: string | null; letter: strin
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <fieldset className="section">
       <legend>{title}</legend>
@@ -392,7 +418,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Switch({
+export function Switch({
   label,
   hint,
   checked,

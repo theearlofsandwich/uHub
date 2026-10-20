@@ -6,74 +6,85 @@
   --accent: #5b8cff;
   --muted: #8a90a0;
   --border: #333744;
-  /* SIDEBAR_WIDTH in src-tauri/src/platform/mod.rs. */
-  --sidebar-width: 220px;
 }
 * { box-sizing: border-box; }
 /* Transparent: while a modal is open the shell covers the whole window and
    the service shows through the backdrop (platform::set_overlay). Only the
-   sidebar paints a background. color-scheme sits on #root, not the root
+   bar paints a background. color-scheme sits on #root, not the root
    element, so it doesn't give the page an opaque dark canvas. */
 html, body, #root { height: 100%; margin: 0; background: transparent; color: #e6e8ee; overflow: hidden; }
 #root { color-scheme: dark; }
 
-/* The shell webview is the sidebar, except while it covers the window for a modal. */
-.sidebar { display: flex; flex-direction: column; width: var(--sidebar-width); height: 100%; padding: 8px; background: var(--bg); }
-h1 { font-size: 15px; margin: 4px 8px 12px; letter-spacing: .04em; }
-.services { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; }
-.bottom { border-top: 1px solid #2a2d36; padding-top: 8px; }
+/* The shell webview is the app bar, except while it covers the window for a
+   modal: fixed to its edge so it stays put either way. --icon-size is set by
+   Sidebar.tsx; the thickness is bar_thickness in src-tauri/src/platform/mod.rs
+   (icon + item padding + bar padding). */
+.sidebar {
+  --bar-size: calc(var(--icon-size) + 2 * 8px + 2 * 6px);
+  position: fixed; display: flex; gap: 4px; padding: 6px; background: var(--bg);
+}
+.sidebar.vertical { top: 0; bottom: 0; width: var(--bar-size); flex-direction: column; }
+.sidebar.horizontal { left: 0; right: 0; height: var(--bar-size); align-items: center; }
+.sidebar.left { left: 0; }
+.sidebar.right { right: 0; }
+.sidebar.top { top: 0; }
+.sidebar.bottom { bottom: 0; }
+h1 { flex: none; margin: 0 8px; font-size: 15px; letter-spacing: .04em; white-space: nowrap; }
+/* Scrolls when the apps don't fit, without a scrollbar eating into the bar. */
+.services {
+  list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: var(--icon-gap); overflow: auto; scrollbar-width: none;
+}
+.services::-webkit-scrollbar { display: none; }
+.horizontal .services { flex-direction: row; }
+.sidebar .bottom { display: flex; flex-direction: column; gap: var(--icon-gap); }
+.vertical .bottom { border-top: 1px solid #2a2d36; padding-top: 4px; }
+.horizontal .bottom { flex-direction: row; border-left: 1px solid #2a2d36; padding-left: 4px; }
 
 button { font: inherit; color: inherit; cursor: pointer; }
 .service {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 9px 10px; margin-bottom: 2px; border: 0; border-radius: 6px;
-  background: transparent; text-align: left;
+  position: relative; display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px; border: 0; border-radius: 6px;
+  background: transparent; text-align: left; white-space: nowrap;
 }
+.horizontal .service { width: auto; }
+.labels .service { padding-right: 12px; }
 .service:hover:not(:disabled, [aria-disabled="true"]) { background: var(--hover); }
 .service:disabled, .service[aria-disabled="true"] { opacity: .45; cursor: default; }
 .service.selected { background: var(--accent); color: #fff; font-weight: 600; }
 .service-icon {
   position: relative; flex: none; display: grid; place-items: center;
-  width: 22px; height: 22px; border-radius: 6px; background: #2a2d36; font-size: 12px; font-weight: 600;
+  width: var(--icon-size); height: var(--icon-size); border-radius: calc(var(--icon-size) / 4);
+  background: #2a2d36; font-size: calc(var(--icon-size) / 2); font-weight: 600;
 }
-.service-icon img { width: 100%; height: 100%; object-fit: contain; border-radius: 5px; }
+.service-icon img { width: 100%; height: 100%; object-fit: contain; border-radius: calc(var(--icon-size) / 4 - 1px); }
+.service-icon.plain { background: transparent; color: var(--muted); font-size: calc(var(--icon-size) * .75); }
+.service:hover .service-icon.plain { color: #e6e8ee; }
+.service.error .service-icon { background: #5c2328; color: #ff8a8f; }
 .service-icon .dot { position: absolute; right: -2px; bottom: -2px; box-shadow: 0 0 0 2px var(--bg); }
 .service.selected .service-icon .dot { box-shadow: 0 0 0 2px var(--accent); }
 .service.add-app { color: var(--muted); }
-.service.add-app .service-icon { background: transparent; border: 1px dashed #4a4e5a; font-size: 15px; font-weight: 400; }
+.service.add-app .service-icon { background: transparent; border: 1px dashed #4a4e5a; font-size: calc(var(--icon-size) * .65); font-weight: 400; }
 .service.add-app:hover { color: #e6e8ee; }
 .playing { flex: none; display: flex; color: var(--muted); font-size: 13px; }
 .service.selected .playing { color: #fff; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #4a4e5a; flex: none; }
 .dot.active { background: #3ddc84; }
 .dot.suspended { background: #f5b942; }
-.service .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.service .name { flex: 1; min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge {
   flex: none; min-width: 18px; padding: 1px 6px; border-radius: 9px;
   background: #e5484d; color: #fff; font-size: 11px; font-weight: 600; text-align: center; line-height: 16px;
 }
 .service.selected .badge { background: #fff; color: var(--accent); }
+/* Without a label, the badge and speaker sit on the icon's top corners. */
+.sidebar:not(.labels) .badge {
+  position: absolute; top: 2px; right: 2px; min-width: 16px; padding: 0 4px;
+  font-size: 10px; line-height: 15px; box-shadow: 0 0 0 2px var(--bg);
+}
+.sidebar:not(.labels) .playing { position: absolute; top: 2px; left: 2px; font-size: 11px; }
 .dot.crashed { background: #ff5c5c; box-shadow: 0 0 0 2px rgba(255, 92, 92, .35); }
 
-.settings { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-.settings button { padding: 6px; border: 1px solid #333744; border-radius: 6px; background: var(--hover); }
-.settings button:disabled { opacity: .4; cursor: default; }
-.settings small { color: var(--muted); line-height: 1.3; }
-.error { position: fixed; left: 8px; width: calc(var(--sidebar-width) - 16px); bottom: 56px; padding: 8px; border-radius: 6px; background: #5c2328; font-size: 12px; }
-.error-kind { margin-right: 6px; opacity: 0.7; }
-.field { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; border-bottom: 1px solid #2a2d36; }
-.field > label { color: var(--muted); font-size: 12px; }
-.field select, .field input:not([type]) {
-  font: inherit; color: inherit; padding: 5px 6px; border: 1px solid #333744; border-radius: 6px; background: var(--bg);
-}
-.field .check { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; line-height: 1.3; }
-.field .inline { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 12px; }
-.field .inline input {
-  width: 4.5em; font: inherit; color: inherit; padding: 3px 4px; border: 1px solid #333744; border-radius: 6px; background: var(--bg);
-}
-.field .row { display: flex; gap: 6px; }
-.field .row button { flex: 1; }
-.settings button.danger { background: #5c2328; border-color: #7a2e35; }
 
 /* "Add app" modal, over the whole window (the shell covers it while open). */
 .modal-backdrop {
@@ -105,7 +116,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .modal-footer .field-error { flex: 1 1 100%; margin: 0 0 4px; }
 .modal-footer .start { margin-right: auto; }
-.modal-footer .confirm { flex: 1; margin: 0; }
+.modal-footer .confirm { flex: 1 1 100%; margin: 0; }
+.modal-footer .confirm-check { display: flex; flex: 1; gap: 8px; align-items: flex-start; font-size: 13px; }
+.confirm-check input { margin: 2px 0 0; }
+.confirm-check small { display: block; color: var(--muted); font-size: 12px; }
+.modal-empty { margin: 8px 0 16px; color: var(--muted); }
 
 .button { padding: 7px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--hover); }
 .button:hover:not(:disabled) { border-color: #4a4e5a; }
@@ -154,6 +169,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .row-field small { color: var(--muted); font-size: 12px; }
 .row-field.disabled > span { opacity: .45; }
 .row-field select:disabled { opacity: .45; }
+.row-field > .range-field { flex-direction: row; align-items: center; gap: 10px; }
+.range-field input { width: 140px; margin: 0; accent-color: var(--accent); }
+.range-field output { min-width: 3.5em; color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 
 .switch {
   appearance: none; flex: none; position: relative; width: 34px; height: 20px; margin: 0;

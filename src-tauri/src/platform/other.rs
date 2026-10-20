@@ -1,11 +1,11 @@
 //! macOS (WKWebView) and Windows (WebView2): child webviews honour
-//! `set_bounds`, so the shell sits at x=0 with `SIDEBAR_WIDTH` and services
+//! `set_bounds`, so the shell sits at the bar's edge (`Bar::rect`) and services
 //! fill the rest (or, with `set_overlay`, the shell covers everything). Unlike
 //! GTK nothing re-lays them out on resize, so `on_window_event` does. Crash,
 //! notification and audio events and muting have no hook here yet (see the
 //! module docs in mod.rs).
 
-use super::{ServiceEvents, SIDEBAR_WIDTH};
+use super::{bar, BarPosition, ServiceEvents};
 use crate::services::PermissionKind;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -25,13 +25,20 @@ const MAIN: &str = "main";
 static EXPANDED: AtomicBool = AtomicBool::new(false);
 
 fn bounds(is_shell: bool, window: LogicalSize<f64>) -> Rect {
-    let sidebar = f64::from(SIDEBAR_WIDTH).min(window.width);
-    let (x, width) = match is_shell {
-        true if EXPANDED.load(Ordering::Relaxed) => (0., window.width),
-        true => (0., sidebar),
-        false => (sidebar, window.width - sidebar),
+    let bar = bar();
+    let (bx, by, bw, bh) = bar.rect(window.width, window.height);
+    let (x, y, width, height) = match is_shell {
+        true if EXPANDED.load(Ordering::Relaxed) => (0., 0., window.width, window.height),
+        true => (bx, by, bw, bh),
+        // The rest of the window, beside the bar.
+        false => match bar.position {
+            BarPosition::Left => (bw, 0., window.width - bw, window.height),
+            BarPosition::Right => (0., 0., window.width - bw, window.height),
+            BarPosition::Top => (0., bh, window.width, window.height - bh),
+            BarPosition::Bottom => (0., 0., window.width, window.height - bh),
+        },
     };
-    Rect { position: LogicalPosition::new(x, 0.).into(), size: LogicalSize::new(width, window.height).into() }
+    Rect { position: LogicalPosition::new(x, y).into(), size: LogicalSize::new(width, height).into() }
 }
 
 fn place<R: Runtime>(webview: &Webview<R>, window: LogicalSize<f64>) -> tauri::Result<()> {
@@ -88,6 +95,16 @@ pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<
         shell.reparent(&window)?;
     }
     place(shell, window_size(&window)?)
+}
+
+/// The bar moved or changed size: re-place every webview in the shell's window.
+pub fn relayout<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
+    let window = shell.window();
+    let size = window_size(&window)?;
+    for webview in window.webviews() {
+        place(&webview, size)?;
+    }
+    Ok(())
 }
 
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {

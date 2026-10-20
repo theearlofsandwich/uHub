@@ -41,6 +41,10 @@ pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result
     webview.with_webview(move |pw| pw.inner().set_is_muted(muted))
 }
 
+pub fn relayout<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
+    shell.with_webview(|pw| layout::relayout(&pw.inner()))
+}
+
 pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
     shell.with_webview(move |pw| layout::set_expanded(&pw.inner(), open))
 }
