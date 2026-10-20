@@ -1,1 +1,1 @@
-console.log("WebDeck injection active for Discord");
+console.log("uHub injection active for Discord");

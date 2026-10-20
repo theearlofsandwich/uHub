@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "WebDeck",
+  "productName": "uHub",
   "version": "0.1.0",
   "identifier": "com.iflo.tauri-app",
   "build": {

@@ -1,14 +1,14 @@
 import { useState } from "react";
-import type { Recipe, Service, Settings } from "../services/types";
+import type { Service, Settings } from "../services/types";
 
 interface Props {
   services: Service[];
-  recipes: Recipe[];
   /** null until loaded. */
   settings: Settings | null;
   onSelect: (id: string) => void;
   onUnload: (id: string) => void;
-  onAdd: (recipeId: string, name: string) => void;
+  /** Open the "Add app" modal. */
+  onAdd: () => void;
   onRemove: (id: string, deleteProfile: boolean) => void;
   onKeepAlive: (id: string, keepAlive: boolean) => void;
   onSettings: (settings: Settings) => void;
@@ -17,7 +17,6 @@ interface Props {
 
 export function Sidebar({
   services,
-  recipes,
   settings: appSettings,
   onSelect,
   onUnload,
@@ -32,33 +31,51 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
-      <h1>WebDeck</h1>
+      <h1>uHub</h1>
       <ul className="services">
-        {services
-          .filter((s) => s.enabled)
-          .map((s) => (
-            <li key={s.id}>
-              <button
-                className={"service" + (s.state === "active" ? " selected" : "")}
-                onClick={() => onSelect(s.id)}
-                title={s.state === "crashed" ? "Crashed: click to reload" : `${s.url}\nprofile: ${s.profile}`}
-              >
+        {services.map((s) => (
+          <li key={s.id}>
+            <button
+              className={"service" + (s.state === "active" ? " selected" : "")}
+              disabled={!s.enabled}
+              onClick={() => onSelect(s.id)}
+              title={
+                !s.enabled
+                  ? `${s.name} is disabled`
+                  : s.state === "crashed"
+                    ? "Crashed: click to reload"
+                    : `${s.url}\nprofile: ${s.profile}`
+              }
+            >
+              <span className="service-icon">
+                {s.icon ? <img src={s.icon} alt="" /> : <span className="icon-letter">{s.name[0]?.toUpperCase()}</span>}
                 <span className={"dot " + s.state} />
-                <span className="name">{s.name}</span>
-                {s.unread > 0 && (
-                  <span className="badge" aria-label={`${s.unread} unread`}>
-                    {s.unread > 99 ? "99+" : s.unread}
-                  </span>
-                )}
-              </button>
-            </li>
-          ))}
+              </span>
+              <span className="name">{s.name}</span>
+              {s.mediaIndicator && s.playingAudio && (
+                <span className="playing" role="img" aria-label="Playing audio" title="Playing audio">
+                  <SpeakerIcon />
+                </span>
+              )}
+              {s.unreadBadge && s.unread > 0 && (
+                <span className="badge" aria-label={`${s.unread} unread`}>
+                  {s.unread > 99 ? "99+" : s.unread}
+                </span>
+              )}
+            </button>
+          </li>
+        ))}
+        <li>
+          <button className="service add-app" onClick={onAdd}>
+            <span className="service-icon">+</span>
+            <span className="name">Add app</span>
+          </button>
+        </li>
       </ul>
 
       <div className="bottom">
         {settings && (
           <div className="settings">
-            <AddService recipes={recipes} onAdd={onAdd} />
             <RemoveService services={services} onRemove={onRemove} />
             {appSettings && (
               <Background services={services} settings={appSettings} onKeepAlive={onKeepAlive} onSettings={onSettings} />
@@ -84,32 +101,14 @@ export function Sidebar({
   );
 }
 
-function AddService({ recipes, onAdd }: { recipes: Recipe[]; onAdd: Props["onAdd"] }) {
-  const [recipeId, setRecipeId] = useState("");
-  const [name, setName] = useState("");
-  const recipe = recipes.find((r) => r.id === recipeId) ?? recipes[0];
-  if (!recipe) return null;
-
+/** A speaker with sound waves, sized by the surrounding font. */
+function SpeakerIcon() {
   return (
-    <form
-      className="field"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onAdd(recipe.id, name.trim() || recipe.name);
-        setName("");
-      }}
-    >
-      <label>Add service</label>
-      <select value={recipe.id} onChange={(e) => setRecipeId(e.target.value)}>
-        {recipes.map((r) => (
-          <option key={r.id} value={r.id}>
-            {r.name}
-          </option>
-        ))}
-      </select>
-      <input value={name} placeholder={recipe.name} maxLength={64} onChange={(e) => setName(e.target.value)} />
-      <button type="submit">Add</button>
-    </form>
+    <svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true">
+      <path d="M2 6h2.5L8 3v10L4.5 10H2z" />
+      <path d="M10.5 5.5a3.5 3.5 0 0 1 0 5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M12.3 3.7a6 6 0 0 1 0 8.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
   );
 }
 

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Recipe, Service, Settings } from "./types";
+import type { NewService, Recipe, Service, SiteInfo, Settings } from "./types";
 
 /** Initial snapshot only; later changes arrive via `onServicesChanged`. */
 export const listServices = () => invoke<Service[]>("list_services");
@@ -8,7 +8,11 @@ export const listRecipes = () => invoke<Recipe[]>("list_recipes");
 export const activateService = (id: string) => invoke<void>("activate_service", { id });
 export const unloadService = (id: string) => invoke<void>("unload_service", { id });
 /** Resolves to the new service's id. */
-export const addService = (recipeId: string, name: string) => invoke<string>("add_service", { recipeId, name });
+export const addService = (service: NewService) => invoke<string>("add_service", { service });
+/** Fetches the page at `url` (from Rust: the shell can't) for a default name and icon. */
+export const inspectSite = (url: string) => invoke<SiteInfo>("inspect_site", { url });
+/** Let the shell cover the whole window, above the service, while it shows a modal. */
+export const setOverlay = (open: boolean) => invoke<void>("set_overlay", { open });
 export const removeService = (id: string, deleteProfile: boolean) =>
   invoke<void>("remove_service", { id, deleteProfile });
 export const renameService = (id: string, name: string) => invoke<void>("rename_service", { id, name });

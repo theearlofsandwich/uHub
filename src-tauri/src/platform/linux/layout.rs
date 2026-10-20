@@ -4,9 +4,16 @@
 //! window's vertical `GtkBox` (`pack_start`); `set_position`/`set_size`/
 //! `set_bounds` only take effect for a `GtkFixed` parent, so they are no-ops
 //! here and children simply stack vertically. To get "220px sidebar | service"
-//! we re-parent both webviews into one horizontal `GtkBox` and let GTK do the
-//! sizing. That also makes window resize and HiDPI scaling GTK's problem.
-//! (Other platforms honour `set_bounds`, see platform/other.rs.)
+//! we re-parent the webviews ourselves and let GTK do the sizing. That also
+//! makes window resize and HiDPI scaling GTK's problem. (Other platforms
+//! honour `set_bounds`, see platform/other.rs.)
+//!
+//! The services go in a horizontal `GtkBox` after a sidebar-wide spacer, and
+//! the shell floats above that row in a `GtkOverlay`: collapsed it covers just
+//! the spacer, expanded (`set_expanded`, while the shell shows a modal) the
+//! whole window. Its background is transparent (lib.rs), so the service stays
+//! visible behind the modal's backdrop. Input outside the shell's allocation
+//! goes to the row as usual.
 //!
 //! These functions must run on the GTK main thread (use `Webview::with_webview`).
 
@@ -14,41 +21,71 @@ use crate::platform::SIDEBAR_WIDTH;
 use gtk::prelude::*;
 use webkit2gtk::WebView;
 
-const ROW_NAME: &str = "webdeck-row";
+const OVERLAY_NAME: &str = "uhub-overlay";
 
-/// Detach `view` from the window's vbox (if still there) and return the shared row.
-fn take_into_row(view: &WebView) -> Option<gtk::Box> {
-    let parent = view.parent()?.downcast::<gtk::Box>().ok()?;
-    if parent.widget_name() == ROW_NAME {
-        parent.remove(view);
-        return Some(parent);
+/// Detach `view` from the window's vbox and return the overlay and its row,
+/// created on first use. `None` if `view` isn't in the vbox (already placed).
+fn take(view: &WebView) -> Option<(gtk::Overlay, gtk::Box)> {
+    let vbox = view.parent()?.downcast::<gtk::Box>().ok()?;
+    if vbox.parent().is_some_and(|p| p.widget_name() == OVERLAY_NAME) {
+        return None;
     }
-    let vbox = parent;
-    let row = vbox
+    let overlay = vbox
         .children()
         .into_iter()
-        .find(|c| c.widget_name() == ROW_NAME)
-        .and_then(|c| c.downcast::<gtk::Box>().ok())
-        .unwrap_or_else(|| {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            row.set_widget_name(ROW_NAME);
-            vbox.pack_start(&row, true, true, 0);
-            row.show();
-            row
-        });
+        .find(|c| c.widget_name() == OVERLAY_NAME)
+        .and_then(|c| c.downcast::<gtk::Overlay>().ok())
+        .unwrap_or_else(|| new_overlay(&vbox));
+    let row = overlay.child()?.downcast::<gtk::Box>().ok()?;
     vbox.remove(view);
-    Some(row)
+    Some((overlay, row))
+}
+
+fn new_overlay(vbox: &gtk::Box) -> gtk::Overlay {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_size_request(SIDEBAR_WIDTH, -1);
+    row.pack_start(&spacer, false, false, 0);
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_widget_name(OVERLAY_NAME);
+    overlay.add(&row);
+    // Sized here rather than from the webview's natural size, which follows its content.
+    overlay.connect_get_child_position(|overlay, child| {
+        let (width, height) = (overlay.allocated_width(), overlay.allocated_height());
+        let width = if child.halign() == gtk::Align::Fill { width } else { SIDEBAR_WIDTH.min(width) };
+        Some(gtk::Allocation::new(0, 0, width, height))
+    });
+    vbox.pack_start(&overlay, true, true, 0);
+    overlay.show_all();
+    overlay
 }
 
 pub(super) fn place_shell(view: &WebView) {
-    if let Some(row) = take_into_row(view) {
+    if let Some((overlay, _)) = take(view) {
         view.set_size_request(SIDEBAR_WIDTH, -1);
-        row.pack_start(view, false, false, 0);
+        view.set_halign(gtk::Align::Start);
+        overlay.add_overlay(view);
     }
 }
 
 pub(super) fn place_service(view: &WebView) {
-    if let Some(row) = take_into_row(view) {
+    if let Some((_, row)) = take(view) {
         row.pack_start(view, true, true, 0);
+    }
+}
+
+/// Let the shell cover the whole window (`true`) or just the sidebar.
+pub(super) fn set_expanded(shell: &WebView, expanded: bool) {
+    shell.set_halign(if expanded { gtk::Align::Fill } else { gtk::Align::Start });
+    // FINDING: changing an overlay child's halign doesn't make GTK re-run the
+    // overlay's allocation (the child's size request is unchanged), so
+    // get-child-position isn't asked again: force it.
+    if let Some(overlay) = shell.parent() {
+        overlay.queue_allocate();
+    }
+    if expanded {
+        // Keys go to the modal, not the service that had focus.
+        shell.grab_focus();
     }
 }

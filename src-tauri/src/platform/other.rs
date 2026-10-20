@@ -1,12 +1,16 @@
 //! macOS (WKWebView) and Windows (WebView2): child webviews honour
 //! `set_bounds`, so the shell sits at x=0 with `SIDEBAR_WIDTH` and services
-//! fill the rest. Unlike GTK nothing re-lays them out on resize, so
-//! `on_window_event` does. Crash and notification events have no hook here
-//! yet (see the module docs in mod.rs).
+//! fill the rest (or, with `set_overlay`, the shell covers everything). Unlike
+//! GTK nothing re-lays them out on resize, so `on_window_event` does. Crash,
+//! notification and audio events and muting have no hook here yet (see the
+//! module docs in mod.rs).
 
 use super::{ServiceEvents, SIDEBAR_WIDTH};
 use crate::services::PermissionKind;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::{
     webview::{PermissionKind as Native, PermissionResponse, WebviewBuilder},
     LogicalPosition, LogicalSize, PhysicalSize, Rect, Runtime, Webview, Window, WindowEvent,
@@ -14,10 +18,19 @@ use tauri::{
 
 /// The shell's label (lib.rs); every other child webview is a service.
 const SHELL: &str = "shell";
+/// The window holding them (lib.rs); others (link windows) lay themselves out.
+const MAIN: &str = "main";
+
+/// Whether the shell covers the whole window (`set_overlay`).
+static EXPANDED: AtomicBool = AtomicBool::new(false);
 
 fn bounds(is_shell: bool, window: LogicalSize<f64>) -> Rect {
     let sidebar = f64::from(SIDEBAR_WIDTH).min(window.width);
-    let (x, width) = if is_shell { (0., sidebar) } else { (sidebar, window.width - sidebar) };
+    let (x, width) = match is_shell {
+        true if EXPANDED.load(Ordering::Relaxed) => (0., window.width),
+        true => (0., sidebar),
+        false => (sidebar, window.width - sidebar),
+    };
     Rect { position: LogicalPosition::new(x, 0.).into(), size: LogicalSize::new(width, window.height).into() }
 }
 
@@ -49,11 +62,31 @@ pub fn service_builder<R: Runtime, E: ServiceEvents>(
     builder
 }
 
-pub fn attach_service<R: Runtime, E: ServiceEvents>(webview: &Webview<R>, _events: Arc<E>) -> tauri::Result<()> {
+pub fn attach_service<R: Runtime, E: ServiceEvents>(
+    webview: &Webview<R>,
+    _events: Arc<E>,
+    muted: bool,
+) -> tauri::Result<()> {
+    if muted {
+        log::warn!("[{}] muting is not implemented on this platform", webview.label());
+    }
     place(webview, window_size(&webview.window())?)
 }
 
+pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
+    EXPANDED.store(open, Ordering::Relaxed);
+    let window = shell.window();
+    if open {
+        // Later children draw on top: re-adding the shell raises it above the services.
+        shell.reparent(&window)?;
+    }
+    place(shell, window_size(&window)?)
+}
+
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+    if window.label() != MAIN {
+        return;
+    }
     let (size, scale): (PhysicalSize<u32>, f64) = match event {
         WindowEvent::Resized(size) => match window.scale_factor() {
             Ok(scale) => (*size, scale),

@@ -12,12 +12,46 @@ export interface Service {
   /** Storage profile; distinct profiles => isolated cookies/storage. */
   profile: string;
   enabled: boolean;
+  /** A data: URL. */
   icon: string | null;
   state: Lifecycle;
   /** Unread count from the page title; 0 while unloaded. */
   unread: number;
   /** Never hibernated: stays loaded in the background (e.g. for notifications). */
   keepAlive: boolean;
+  /** false: the webview is muted. */
+  audio: boolean;
+  /** Show `playingAudio` in the sidebar. */
+  mediaIndicator: boolean;
+  /** Show `unread` in the sidebar (and count it in the tray). */
+  unreadBadge: boolean;
+  /** The page is playing audio right now (only reported on Linux). */
+  playingAudio: boolean;
+}
+
+/** Mirrors `NewService` in src-tauri/src/services.rs: what "Add app" creates. */
+export interface NewService {
+  name: string;
+  /** http(s); the recipe (WhatsApp, Gmail...) is picked from it. */
+  url: string;
+  /** A data: URL; null for none. */
+  icon: string | null;
+  notifications: boolean;
+  audio: boolean;
+  mediaIndicator: boolean;
+  unreadBadge: boolean;
+  enabled: boolean;
+  hibernation: boolean;
+  hibernateAfterMinutes: number;
+  openLinksInside: boolean;
+}
+
+/** Mirrors `SiteInfo` in src-tauri/src/favicon.rs. */
+export interface SiteInfo {
+  /** A short name from the page title. */
+  name: string | null;
+  /** The site's icon as a data: URL. */
+  icon: string | null;
 }
 
 /** Mirrors `Settings` in src-tauri/src/services.rs; snake_case as stored in services.json. */
@@ -46,6 +80,7 @@ export type ErrorKind =
   | "webviewMissing"
   | "createFailed"
   | "invalidConfig"
+  | "fetch"
   | "io"
   | "tauri";
 

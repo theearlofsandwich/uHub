@@ -2,8 +2,8 @@
 //! interface so webviews.rs and lib.rs need no cfgs.
 //!
 //! - **Linux** (linux.rs): WebKitGTK. Layout is a GTK re-parenting shim (see
-//!   linux/layout.rs); crash, title, notification and permission events come
-//!   from WebKitGTK signals.
+//!   linux/layout.rs); crash, title, notification, permission and
+//!   playing-audio events come from WebKitGTK signals, and muting is native.
 //! - **macOS / Windows** (other.rs): WKWebView / WebView2. Child webviews are
 //!   placed with `set_bounds` and re-placed when the window resizes. Title and
 //!   permission events come from tauri's cross-platform builder hooks.
@@ -29,6 +29,13 @@
 //!   everything. WKWebView only forwards camera/microphone; geolocation follows
 //!   the system's location prompt (and needs an Info.plist usage string), and
 //!   there are no web notifications to ask for.
+//! - **Muting** (`Instance::audio` off): WebView2 has `ICoreWebView2_8::put_IsMuted`
+//!   and `add_IsDocumentPlayingAudioChanged` (for `ServiceEvents::playing_audio`);
+//!   WKWebView has no public API for either. Not hooked up yet: services play
+//!   sound, and no media indicator is shown.
+//! - **The shell over a service** (`set_overlay`, for modals): the shell is
+//!   resized to the window and re-added to raise it over the services, but its
+//!   transparency needs tauri's `macos-private-api` on macOS. Untested.
 //! - **Unread badges** work everywhere (`on_document_title_changed` on non-Linux).
 
 #[cfg(target_os = "linux")]
@@ -45,7 +52,8 @@ use std::sync::Arc;
 use tauri::{webview::WebviewBuilder, Runtime, Webview, Window, WindowEvent};
 
 /// Width of the shell (sidebar) webview in logical pixels. The shell's CSS
-/// doesn't repeat it: the sidebar fills its own webview's viewport.
+/// repeats it as `--sidebar-width` (src/App.css), for when the shell covers the
+/// whole window (`set_overlay`).
 pub const SIDEBAR_WIDTH: i32 = 220;
 
 /// What a service webview reports through native events. All methods are
@@ -62,6 +70,11 @@ pub trait ServiceEvents: Send + Sync + 'static {
     fn notification(&self, title: String, body: String);
     /// Decide a permission request: `true` to allow.
     fn permission(&self, kind: PermissionKind) -> bool;
+    /// Whether to report when the page starts or stops playing audio.
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "no non-Linux hook yet, see module docs"))]
+    fn watches_audio(&self) -> bool;
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "no non-Linux hook yet, see module docs"))]
+    fn playing_audio(&self, playing: bool);
 }
 
 /// Lay out the shell as the sidebar, at the window's left edge.
@@ -77,10 +90,20 @@ pub fn service_builder<R: Runtime, E: ServiceEvents>(
     imp::service_builder(builder, events)
 }
 
-/// Lay out a just-created service webview right of the sidebar and connect the
-/// event hooks that need the native webview.
-pub fn attach_service<R: Runtime, E: ServiceEvents>(webview: &Webview<R>, events: Arc<E>) -> tauri::Result<()> {
-    imp::attach_service(webview, events)
+/// Lay out a just-created service webview right of the sidebar, mute it if
+/// `muted`, and connect the event hooks that need the native webview.
+pub fn attach_service<R: Runtime, E: ServiceEvents>(
+    webview: &Webview<R>,
+    events: Arc<E>,
+    muted: bool,
+) -> tauri::Result<()> {
+    imp::attach_service(webview, events, muted)
+}
+
+/// Let the shell cover the whole window, above the service (`open`, while it
+/// shows a modal), or go back to being the sidebar.
+pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
+    imp::set_overlay(shell, open)
 }
 
 /// Window event handler: keeps the layout in step with the window's size.

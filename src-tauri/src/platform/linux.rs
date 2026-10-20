@@ -24,12 +24,21 @@ pub fn service_builder<R: Runtime, E: ServiceEvents>(
     builder
 }
 
-pub fn attach_service<R: Runtime, E: ServiceEvents>(webview: &Webview<R>, events: Arc<E>) -> tauri::Result<()> {
+pub fn attach_service<R: Runtime, E: ServiceEvents>(
+    webview: &Webview<R>,
+    events: Arc<E>,
+    muted: bool,
+) -> tauri::Result<()> {
     webview.with_webview(move |pw| {
         let view = pw.inner();
         layout::place_service(&view);
+        view.set_is_muted(muted);
         connect_signals(&view, events);
     })
+}
+
+pub fn set_overlay<R: Runtime>(shell: &Webview<R>, open: bool) -> tauri::Result<()> {
+    shell.with_webview(move |pw| layout::set_expanded(&pw.inner(), open))
 }
 
 /// GTK sizes the webviews (see layout.rs).
@@ -60,6 +69,11 @@ fn connect_signals<E: ServiceEvents>(view: &WebView, events: Arc<E>) {
     if events.watches_title() {
         let e = events.clone();
         view.connect_title_notify(move |v| e.title_changed(&v.title().unwrap_or_default()));
+    }
+
+    if events.watches_audio() {
+        let e = events.clone();
+        view.connect_is_playing_audio_notify(move |v| e.playing_audio(v.is_playing_audio()));
     }
 
     let e = events.clone();

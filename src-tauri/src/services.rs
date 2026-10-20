@@ -8,6 +8,10 @@
 //! buggy frontend cannot point a service at an arbitrary origin. Everything
 //! read from the config file is validated here (profile names become paths, URL
 //! overrides must stay within the recipe's domains) before it is used.
+//!
+//! Apps added by URL ("Add app" in the shell) use the recipe whose domains the
+//! URL is in, or else the [`CUSTOM`] recipe, which may navigate within the
+//! URL's site (see [`site_of`]).
 
 use crate::{
     badge::{self, BadgeParser},
@@ -21,8 +25,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Url;
+use url::Host;
 
-/// A site WebDeck knows how to host. Compiled in, keyed by `id`.
+/// A site uHub knows how to host. Compiled in, keyed by `id`.
 pub struct Recipe {
     pub id: &'static str,
     pub name: &'static str,
@@ -42,6 +47,10 @@ pub struct Recipe {
     /// background so their notifications keep arriving.
     pub keep_alive: bool,
 }
+
+/// Recipe id of an app added by a URL no other recipe covers. Its instances
+/// always carry their own URL, and their allowed domain is derived from it.
+pub const CUSTOM: &str = "custom";
 
 pub const RECIPES: &[Recipe] = &[
     Recipe {
@@ -83,6 +92,19 @@ pub const RECIPES: &[Recipe] = &[
         user_media: true,
         keep_alive: true,
     },
+    Recipe {
+        id: CUSTOM,
+        name: "Custom",
+        url: "",
+        allowed_domains: &[],
+        inject_js: "",
+        inject_css: "",
+        user_agent: None,
+        icon: None,
+        badge: Some(badge::from_title),
+        user_media: true,
+        keep_alive: false,
+    },
 ];
 
 pub fn recipe(id: &str) -> Option<&'static Recipe> {
@@ -111,11 +133,76 @@ pub struct Instance {
     /// Never hibernate this service; `None` means the recipe's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<bool>,
+    /// Hibernate after this many minutes in the background instead of the
+    /// app-wide `Settings::hibernate_after_minutes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernate_after_minutes: Option<u32>,
+    /// A base64 `data:image/...` URL; `None` means the recipe's icon, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Sound from the page (media and its own notification sounds); `false`
+    /// mutes the webview.
+    #[serde(default = "yes")]
+    pub audio: bool,
+    /// Show in the sidebar while the page plays audio.
+    #[serde(default = "yes")]
+    pub media_indicator: bool,
+    /// Show the unread count in the sidebar and include it in the tray total.
+    #[serde(default = "yes")]
+    pub unread_badge: bool,
+    /// Off-site links open in a uHub window (with this service's profile)
+    /// instead of the system browser.
+    #[serde(default)]
+    pub open_links_inside: bool,
+}
+
+impl Instance {
+    /// An instance with every option at its default, in its own profile named after `id`.
+    fn new(id: String, name: String, recipe: &str, order: u32) -> Self {
+        Self {
+            profile: id.clone(),
+            id,
+            name,
+            recipe: recipe.into(),
+            url: None,
+            enabled: true,
+            order,
+            permissions: Permissions::default(),
+            keep_alive: None,
+            hibernate_after_minutes: None,
+            icon: None,
+            audio: true,
+            media_indicator: true,
+            unread_badge: true,
+            open_links_inside: false,
+        }
+    }
+}
+
+/// What the shell's "Add app" form sends: the app's URL rather than a recipe.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct NewService {
+    pub name: String,
+    pub url: String,
+    pub icon: Option<String>,
+    pub notifications: bool,
+    pub audio: bool,
+    pub media_indicator: bool,
+    pub unread_badge: bool,
+    pub enabled: bool,
+    /// `false`: kept alive (see `Instance::keep_alive`).
+    pub hibernation: bool,
+    pub hibernate_after_minutes: u32,
+    pub open_links_inside: bool,
 }
 
 fn yes() -> bool {
     true
 }
+
+/// Longest hibernation delay, app-wide or per service: a week.
+const MAX_HIBERNATE_MINUTES: u32 = 7 * 24 * 60;
 
 /// App-wide settings, the `settings` object of services.json.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -145,7 +232,7 @@ impl Default for Settings {
 
 impl Settings {
     fn validate(&self) -> Result<()> {
-        if self.hibernate_after_minutes > 7 * 24 * 60 {
+        if self.hibernate_after_minutes > MAX_HIBERNATE_MINUTES {
             return Err(Error::invalid("hibernate after must be at most a week"));
         }
         if self.max_suspended.is_some_and(|n| n > 100) {
@@ -188,6 +275,8 @@ pub enum PermissionKind {
 pub struct Service {
     pub instance: Instance,
     pub recipe: &'static Recipe,
+    /// The recipe's domains, or for a custom app the site of its URL.
+    allowed: Vec<String>,
 }
 
 impl std::fmt::Debug for Recipe {
@@ -222,14 +311,15 @@ pub fn validate_name(name: &str) -> Result<String> {
     Ok(name.to_owned())
 }
 
-/// A URL override may change the path or subdomain, never the site.
+/// A URL override may change the path or subdomain, never the site. A custom
+/// app's URL may be any http(s) URL.
 pub fn validate_url_override(recipe: &Recipe, url: &str) -> Result<Url> {
-    let parsed: Url = url.parse().map_err(|e| Error::invalid(format!("invalid url {url:?}: {e}")))?;
+    let parsed = parse_app_url(url)?;
+    if recipe.id == CUSTOM {
+        return Ok(parsed);
+    }
     if parsed.scheme() != "https" {
         return Err(Error::invalid(format!("url {url:?} must use https")));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(Error::invalid(format!("url {url:?} must not contain credentials")));
     }
     match parsed.host_str() {
         Some(h) if navigation::host_allowed(h, recipe.allowed_domains) => Ok(parsed),
@@ -240,16 +330,91 @@ pub fn validate_url_override(recipe: &Recipe, url: &str) -> Result<Url> {
     }
 }
 
+/// An http(s) URL with a host and no credentials.
+pub fn parse_app_url(url: &str) -> Result<Url> {
+    let parsed: Url = url.parse().map_err(|e| Error::invalid(format!("invalid url {url:?}: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none_or(str::is_empty) {
+        return Err(Error::invalid(format!("url {url:?} must be an http(s) address")));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::invalid(format!("url {url:?} must not contain credentials")));
+    }
+    Ok(parsed)
+}
+
+/// The recipe an app at `url` is an instance of: the first whose domains it is
+/// in (over https), else [`CUSTOM`].
+fn recipe_for(url: &Url) -> &'static Recipe {
+    RECIPES
+        .iter()
+        .find(|r| {
+            r.id != CUSTOM
+                && url.scheme() == "https"
+                && url.host_str().is_some_and(|h| navigation::host_allowed(h, r.allowed_domains))
+        })
+        .or_else(|| recipe(CUSTOM))
+        .expect("the custom recipe exists")
+}
+
+/// The site a custom app may navigate within: its URL's host without
+/// subdomains ("app.slack.com" -> "slack.com"), so logins elsewhere on the
+/// site work. Without the public suffix list this is a guess: a short label
+/// under a two-letter TLD counts as part of the suffix ("bbc.co.uk", not
+/// "co.uk"). IP addresses and single-label hosts are kept whole.
+pub fn site_of(url: &Url) -> String {
+    let domain = match url.host() {
+        Some(Host::Domain(d)) => d.trim_end_matches('.').to_ascii_lowercase(),
+        Some(ip) => return ip.to_string(),
+        None => return String::new(),
+    };
+    let labels: Vec<&str> = domain.split('.').collect();
+    let n = labels.len();
+    let keep = if n >= 3 && labels[n - 1].len() == 2 && labels[n - 2].len() <= 3 { 3 } else { 2 };
+    labels[n.saturating_sub(keep)..].join(".")
+}
+
+/// Largest accepted icon, as a data: URL (the whole config is rewritten on every change).
+pub const MAX_ICON_LEN: usize = 256 * 1024;
+
+/// Icons are shown by the shell as `<img src>`, so only base64 `data:image/`
+/// URLs are accepted: a remote URL would have the trusted shell fetch it.
+pub fn validate_icon(icon: &str) -> Result<()> {
+    let ok = icon.len() <= MAX_ICON_LEN
+        && icon.strip_prefix("data:image/").and_then(|r| r.split_once(";base64,")).is_some_and(|(ty, data)| {
+            !ty.is_empty()
+                && ty.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+                && data.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!("icon must be a base64 image data: URL of at most {} KiB", MAX_ICON_LEN / 1024)))
+    }
+}
+
 impl Service {
     pub fn new(instance: Instance) -> Result<Self> {
         validate_token("id", &instance.id)?;
         validate_profile(&instance.profile)?;
         validate_name(&instance.name)?;
         let recipe = recipe(&instance.recipe).ok_or_else(|| Error::invalid(format!("unknown recipe {:?}", instance.recipe)))?;
-        if let Some(url) = &instance.url {
-            validate_url_override(recipe, url)?;
+        let allowed = match (&instance.url, recipe.id) {
+            (Some(url), CUSTOM) => vec![site_of(&validate_url_override(recipe, url)?)],
+            (None, CUSTOM) => return Err(Error::invalid(format!("custom service {:?} has no url", instance.id))),
+            (url, _) => {
+                if let Some(url) = url {
+                    validate_url_override(recipe, url)?;
+                }
+                recipe.allowed_domains.iter().map(|d| (*d).to_owned()).collect()
+            }
+        };
+        if let Some(icon) = &instance.icon {
+            validate_icon(icon)?;
         }
-        Ok(Self { instance, recipe })
+        if instance.hibernate_after_minutes.is_some_and(|m| m == 0 || m > MAX_HIBERNATE_MINUTES) {
+            return Err(Error::invalid("hibernate after must be between a minute and a week"));
+        }
+        Ok(Self { instance, recipe, allowed })
     }
 
     pub fn id(&self) -> &str {
@@ -260,8 +425,13 @@ impl Service {
         self.instance.url.as_deref().unwrap_or(self.recipe.url)
     }
 
-    pub fn allowed_domains(&self) -> &'static [&'static str] {
-        self.recipe.allowed_domains
+    pub fn allowed_domains(&self) -> &[String] {
+        &self.allowed
+    }
+
+    /// The instance's own icon, else the recipe's.
+    pub fn icon(&self) -> Option<String> {
+        self.instance.icon.clone().or_else(|| self.recipe.icon.map(String::from))
     }
 
     pub fn keep_alive(&self) -> bool {
@@ -283,7 +453,7 @@ impl Service {
     /// top-level navigation, before any page script. Guarded to the service's own
     /// domains because it re-runs on every navigation (e.g. login redirects).
     pub fn init_script(&self) -> String {
-        let hosts = serde_json::to_string(self.recipe.allowed_domains).unwrap();
+        let hosts = serde_json::to_string(self.allowed_domains()).unwrap();
         let css = serde_json::to_string(self.recipe.inject_css).unwrap();
         format!(
             r#"(function () {{
@@ -312,7 +482,7 @@ impl Service {
   if (css.trim()) {{
     var add = function () {{
       var s = document.createElement("style");
-      s.setAttribute("data-webdeck", "");
+      s.setAttribute("data-uhub", "");
       s.textContent = css;
       (document.head || document.documentElement).appendChild(s);
     }};
@@ -359,18 +529,7 @@ pub fn seed() -> Vec<Service> {
     .into_iter()
     .enumerate()
     .map(|(i, (id, name, recipe))| {
-        Service::new(Instance {
-            id: id.into(),
-            name: name.into(),
-            recipe: recipe.into(),
-            profile: id.into(),
-            url: None,
-            enabled: true,
-            order: i as u32,
-            permissions: Permissions::default(),
-            keep_alive: None,
-        })
-        .expect("seed services are valid")
+        Service::new(Instance::new(id.into(), name.into(), recipe, i as u32)).expect("seed services are valid")
     })
     .collect()
 }
@@ -483,25 +642,28 @@ impl Config {
         Ok(next)
     }
 
-    /// Add an instance of `recipe_id` with a fresh id and its own profile.
-    /// `profile_taken` reports leftover profile directories, which are never
-    /// reused: a new account must not inherit an old login. Returns the new id.
-    pub fn add(&mut self, recipe_id: &str, name: &str, profile_taken: impl Fn(&str) -> bool) -> Result<String> {
-        let recipe = recipe(recipe_id).ok_or_else(|| Error::invalid(format!("unknown recipe {recipe_id:?}")))?;
+    /// Add the app at `new.url` (an instance of the recipe covering it, see
+    /// [`recipe_for`]) with a fresh id and its own profile. `profile_taken`
+    /// reports leftover profile directories, which are never reused: a new
+    /// account must not inherit an old login. Returns the new id.
+    pub fn add(&mut self, new: &NewService, profile_taken: impl Fn(&str) -> bool) -> Result<String> {
+        let url = parse_app_url(new.url.trim())?;
+        let recipe = recipe_for(&url);
         let id = fresh_id(recipe.id, unix_millis(), |c| {
             self.services().iter().any(|s| s.instance.id == c || s.instance.profile == c) || profile_taken(c)
         });
-        let svc = Service::new(Instance {
-            id: id.clone(),
-            name: validate_name(name)?,
-            recipe: recipe.id.into(),
-            profile: id.clone(),
-            url: None,
-            enabled: true,
-            order: self.services().len() as u32,
-            permissions: Permissions::default(),
-            keep_alive: None,
-        })?;
+        let mut inst = Instance::new(id.clone(), validate_name(&new.name)?, recipe.id, self.services().len() as u32);
+        inst.url = (url.as_str() != recipe.url).then(|| url.to_string());
+        inst.enabled = new.enabled;
+        inst.permissions.notifications = new.notifications;
+        inst.keep_alive = Some(!new.hibernation);
+        inst.hibernate_after_minutes = Some(new.hibernate_after_minutes);
+        inst.icon = new.icon.clone();
+        inst.audio = new.audio;
+        inst.media_indicator = new.media_indicator;
+        inst.unread_badge = new.unread_badge;
+        inst.open_links_inside = new.open_links_inside;
+        let svc = Service::new(inst)?;
         let mut next = self.saved.clone();
         next.services.push(svc);
         self.commit(next)?;
@@ -642,15 +804,20 @@ pub struct ServiceInfo {
     pub name: String,
     pub recipe: &'static str,
     pub url: String,
-    pub allowed_domains: &'static [&'static str],
+    pub allowed_domains: Vec<String>,
     pub profile: String,
     pub enabled: bool,
-    pub icon: Option<&'static str>,
+    pub icon: Option<String>,
     pub state: Lifecycle,
     /// From the page title (see badge.rs); 0 while unloaded.
     pub unread: u32,
     /// Never hibernated (the instance's setting or the recipe's default).
     pub keep_alive: bool,
+    pub audio: bool,
+    pub media_indicator: bool,
+    pub unread_badge: bool,
+    /// The page is playing audio right now (Linux only, see platform/mod.rs).
+    pub playing_audio: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -666,6 +833,7 @@ pub struct RecipeInfo {
 pub fn recipe_infos() -> Vec<RecipeInfo> {
     RECIPES
         .iter()
+        .filter(|r| r.id != CUSTOM)
         .map(|r| RecipeInfo { id: r.id, name: r.name, url: r.url, allowed_domains: r.allowed_domains, icon: r.icon })
         .collect()
 }
@@ -676,7 +844,7 @@ mod tests {
 
     /// A fresh, empty directory under the system temp dir.
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("webdeck-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("uhub-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -782,17 +950,34 @@ mod tests {
         assert!(validate_name("a\nb").is_err());
     }
 
+    fn new_app(name: &str, url: &str) -> NewService {
+        NewService {
+            name: name.into(),
+            url: url.into(),
+            icon: None,
+            notifications: true,
+            audio: true,
+            media_indicator: true,
+            unread_badge: true,
+            enabled: true,
+            hibernation: true,
+            hibernate_after_minutes: 15,
+            open_links_inside: false,
+        }
+    }
+
     #[test]
     fn add_remove_rename_reorder() {
         let path = temp_dir("mutate").join("services.json");
         let mut c = Config::load(path.clone()).unwrap();
-        let id = c.add("gmail", "Gmail (Side)", |_| false).unwrap();
+        let id = c.add(&new_app("Gmail (Side)", "https://mail.google.com/"), |_| false).unwrap();
         assert!(id.starts_with("gmail-"));
         let new = c.find(&id).unwrap();
         assert_eq!(new.instance.profile, id);
         assert_eq!(new.instance.order, 4);
-        assert!(c.add("nope", "X", |_| false).is_err());
-        assert!(c.add("gmail", " ", |_| false).is_err());
+        assert_eq!(new.instance.url, None, "the recipe's own url isn't stored");
+        assert!(c.add(&new_app("X", "ftp://example.com/"), |_| false).is_err());
+        assert!(c.add(&new_app(" ", "https://mail.google.com/"), |_| false).is_err());
 
         let mut order: Vec<String> = ids(&c).into_iter().rev().map(String::from).collect();
         c.reorder(&order).unwrap();
@@ -893,6 +1078,84 @@ mod tests {
         assert_eq!(saved.settings.hibernate_after_minutes, 0);
         assert!(saved.settings.close_to_tray, "missing field: its default");
         assert_eq!(saved.last_active.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn add_by_url_picks_recipe_or_custom_and_keeps_options() {
+        let path = temp_dir("add-url").join("services.json");
+        let mut c = Config::load(path.clone()).unwrap();
+
+        let wa = c.add(&new_app("WA 2", "https://web.whatsapp.com/"), |_| false).unwrap();
+        assert_eq!(c.find(&wa).unwrap().recipe.id, "whatsapp");
+        // http never matches a recipe (their overrides must be https).
+        let plain = c.add(&new_app("WA http", "http://web.whatsapp.com/"), |_| false).unwrap();
+        assert_eq!(c.find(&plain).unwrap().recipe.id, CUSTOM);
+
+        let mut opts = new_app("Slack", " https://app.slack.com/client ");
+        opts.icon = Some("data:image/png;base64,iVBORw0KGgo=".into());
+        opts.audio = false;
+        opts.hibernation = false;
+        opts.hibernate_after_minutes = 30;
+        opts.open_links_inside = true;
+        opts.enabled = false;
+        let id = c.add(&opts, |_| false).unwrap();
+        assert!(id.starts_with("custom-"));
+        let slack = c.find(&id).unwrap();
+        assert_eq!(slack.url(), "https://app.slack.com/client");
+        assert_eq!(slack.allowed_domains(), ["slack.com"]);
+        assert!(slack.keep_alive(), "hibernation off: kept alive");
+        assert!(slack.init_script().contains(r#"["slack.com"]"#));
+
+        let reloaded = Config::load(path).unwrap();
+        let inst = &reloaded.find(&id).unwrap().instance;
+        assert_eq!(inst, &slack.instance);
+        assert!(!inst.audio && !inst.enabled && inst.open_links_inside);
+        assert_eq!(inst.hibernate_after_minutes, Some(30));
+
+        let mut bad = new_app("X", "https://x.example/");
+        bad.icon = Some("https://x.example/favicon.ico".into());
+        assert!(c.add(&bad, |_| false).is_err(), "remote icon");
+        let mut bad = new_app("X", "https://x.example/");
+        bad.hibernate_after_minutes = 0;
+        assert!(c.add(&bad, |_| false).is_err());
+        assert!(c.add(&new_app("X", "https://user:pw@x.example/"), |_| false).is_err());
+    }
+
+    #[test]
+    fn custom_entries_need_a_url() {
+        let json = r#"{"version":1,"services":[
+            {"id":"a","name":"A","recipe":"custom","profile":"a"},
+            {"id":"b","name":"B","recipe":"custom","profile":"b","url":"http://192.168.1.10:8123/"}
+        ]}"#;
+        let s = parse(json).unwrap().services;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].allowed_domains(), ["192.168.1.10"]);
+        assert!(recipe_infos().iter().all(|r| r.id != CUSTOM), "not offered as a recipe");
+    }
+
+    #[test]
+    fn site_guess() {
+        let site = |u: &str| site_of(&u.parse().unwrap());
+        assert_eq!(site("https://app.slack.com/x"), "slack.com");
+        assert_eq!(site("https://slack.com/"), "slack.com");
+        assert_eq!(site("https://news.bbc.co.uk/"), "bbc.co.uk");
+        assert_eq!(site("https://a.b.example.com.au/"), "example.com.au");
+        assert_eq!(site("https://www.example.de/"), "example.de");
+        assert_eq!(site("https://WWW.Example.COM./"), "example.com");
+        assert_eq!(site("http://localhost:3000/"), "localhost");
+        assert_eq!(site("http://10.0.0.2/"), "10.0.0.2");
+        assert_eq!(site("http://[::1]:8080/"), "[::1]");
+    }
+
+    #[test]
+    fn icon_validation() {
+        for ok in ["data:image/png;base64,iVBORw0KGgo=", "data:image/svg+xml;base64,PHN2Zz4=", "data:image/x-icon;base64,AAAB"] {
+            assert!(validate_icon(ok).is_ok(), "{ok}");
+        }
+        let huge = format!("data:image/png;base64,{}", "A".repeat(MAX_ICON_LEN));
+        for bad in ["", "https://x/y.png", "data:text/html;base64,PGI+", "data:image/png,<svg>", "data:image/;base64,AA", "data:image/png;base64,A\"\"", &huge] {
+            assert!(validate_icon(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

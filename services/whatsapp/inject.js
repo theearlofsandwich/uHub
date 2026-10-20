@@ -1,1 +1,1 @@
-console.log("WebDeck injection active for WhatsApp");
+console.log("uHub injection active for WhatsApp");

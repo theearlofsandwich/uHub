@@ -1,1 +1,1 @@
-console.log("WebDeck injection active for Gmail");
+console.log("uHub injection active for Gmail");

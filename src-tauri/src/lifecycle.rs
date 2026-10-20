@@ -8,9 +8,10 @@
 //! service keeps its (dead) handle, and stays `active` if it was on screen,
 //! until it is activated (recreated) or unloaded.
 //!
-//! Unread counts are reported by a live webview, so they are kept here too and
-//! dropped with its handle. So is the time a suspended service was last on
-//! screen, which decides when it is hibernated (see `select_hibernation`).
+//! Unread counts and whether audio is playing are reported by a live webview,
+//! so they are kept here too and dropped with its handle. So is the time a
+//! suspended service was last on screen, which decides when it is hibernated
+//! (see `select_hibernation`).
 //!
 //! Each transition calls into a `Backend` (real webviews in webviews.rs, a fake
 //! in the tests) and only updates the registry for the steps that succeeded.
@@ -39,6 +40,8 @@ pub struct Registry<H> {
     crashed: HashSet<String>,
     /// Non-zero unread counts. Always a subset of `handles`' keys.
     unread: HashMap<String, u32>,
+    /// Services whose page is playing audio. Always a subset of `handles`' keys.
+    playing: HashSet<String>,
     /// When each service was last hidden by a switch. Always a subset of
     /// `handles`' keys; every SUSPENDED service has one.
     hidden_at: HashMap<String, Instant>,
@@ -51,33 +54,48 @@ impl<H> Default for Registry<H> {
             active: None,
             crashed: HashSet::new(),
             unread: HashMap::new(),
+            playing: HashSet::new(),
             hidden_at: HashMap::new(),
         }
     }
 }
 
-/// When background services are unloaded; a `None` turns that rule off.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Hibernation {
-    /// Unload a service once it has been in the background this long.
-    pub idle: Option<Duration>,
-    /// Keep at most this many in the background; the oldest go first.
-    pub max_suspended: Option<usize>,
+/// When one background service is unloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hibernate {
+    /// Never: it is kept alive, and doesn't count against the background cap.
+    Never,
+    /// Only to keep the background within the cap.
+    OverCap,
+    /// Once it has been in the background this long (or for the cap).
+    After(Duration),
 }
 
-/// Of `suspended` (id, when it was last on screen), the ones `policy` says to
-/// unload at `now`, oldest first: every one idle for at least `policy.idle`,
-/// and the oldest of the rest beyond `policy.max_suspended`. Both rules pick
-/// from the oldest end, so the result is the oldest `n` for the larger `n`.
-pub fn select_hibernation(mut suspended: Vec<(&str, Instant)>, now: Instant, policy: Hibernation) -> Vec<&str> {
+/// Of `suspended` (id, when it was last on screen, its rule), the ones to
+/// unload at `now`, oldest first: every one idle for at least its `After`
+/// limit, and then the oldest of the rest while more than `max_suspended`
+/// (counting neither those nor the `Never` ones) would stay.
+pub fn select_hibernation(
+    mut suspended: Vec<(&str, Instant, Hibernate)>,
+    now: Instant,
+    max_suspended: Option<usize>,
+) -> Vec<&str> {
+    suspended.retain(|&(_, _, rule)| rule != Hibernate::Never);
     // By id too, so equal timestamps give a stable answer.
-    suspended.sort_by_key(|&(id, t)| (t, id));
-    let idle = policy.idle.map_or(0, |limit| {
-        suspended.iter().take_while(|&&(_, t)| now.saturating_duration_since(t) >= limit).count()
-    });
-    let over_cap = policy.max_suspended.map_or(0, |cap| suspended.len().saturating_sub(cap));
-    suspended.truncate(idle.max(over_cap));
-    suspended.into_iter().map(|(id, _)| id).collect()
+    suspended.sort_by_key(|&(id, t, _)| (t, id));
+    let idle = |t: Instant, rule| matches!(rule, Hibernate::After(limit) if now.saturating_duration_since(t) >= limit);
+    let n_idle = suspended.iter().filter(|&&(_, t, rule)| idle(t, rule)).count();
+    let mut over_cap = max_suspended.map_or(0, |cap| (suspended.len() - n_idle).saturating_sub(cap));
+    let mut out = Vec::new();
+    for (id, t, rule) in suspended {
+        if idle(t, rule) {
+            out.push(id);
+        } else if over_cap > 0 {
+            over_cap -= 1;
+            out.push(id);
+        }
+    }
+    out
 }
 
 impl<H> Registry<H> {
@@ -106,13 +124,17 @@ impl<H> Registry<H> {
                 name: s.instance.name.clone(),
                 recipe: s.recipe.id,
                 url: s.url().to_owned(),
-                allowed_domains: s.allowed_domains(),
+                allowed_domains: s.allowed_domains().to_vec(),
                 profile: s.instance.profile.clone(),
                 enabled: s.instance.enabled,
-                icon: s.recipe.icon,
+                icon: s.icon(),
                 state: self.state(s.id()),
                 unread: self.unread.get(s.id()).copied().unwrap_or(0),
                 keep_alive: s.keep_alive(),
+                audio: s.instance.audio,
+                media_indicator: s.instance.media_indicator,
+                unread_badge: s.instance.unread_badge,
+                playing_audio: self.playing.contains(s.id()),
             })
             .collect()
     }
@@ -138,22 +160,32 @@ impl<H> Registry<H> {
         old.unwrap_or(0) != count
     }
 
-    /// The SUSPENDED services `hibernatable` allows that `policy` says to
-    /// unload at `now`, oldest first. Crashed ones are left alone: their web
+    /// Record whether `id`'s page is playing audio, if `is_current` confirms
+    /// the report is about the handle we still hold. Returns whether that changed.
+    pub fn set_playing(&mut self, id: &str, playing: bool, is_current: impl FnOnce(&H) -> bool) -> bool {
+        match self.handles.get(id) {
+            Some(handle) if is_current(handle) => {}
+            _ => return false,
+        }
+        if playing { self.playing.insert(id.to_owned()) } else { self.playing.remove(id) }
+    }
+
+    /// The SUSPENDED services to unload at `now` by each one's `rule` and the
+    /// background cap, oldest first. Crashed ones are left alone: their web
     /// process is already gone.
     pub fn hibernation_candidates(
         &self,
         now: Instant,
-        policy: Hibernation,
-        hibernatable: impl Fn(&str) -> bool,
+        max_suspended: Option<usize>,
+        rule: impl Fn(&str) -> Hibernate,
     ) -> Vec<String> {
         let suspended = self
             .hidden_at
             .iter()
-            .filter(|&(id, _)| self.state(id) == Lifecycle::Suspended && hibernatable(id))
-            .map(|(id, &t)| (id.as_str(), t))
+            .filter(|&(id, _)| self.state(id) == Lifecycle::Suspended)
+            .map(|(id, &t)| (id.as_str(), t, rule(id)))
             .collect();
-        select_hibernation(suspended, now, policy).into_iter().map(String::from).collect()
+        select_hibernation(suspended, now, max_suspended).into_iter().map(String::from).collect()
     }
 
     /// Make `svc` the one visible service: hide the current one, then show or
@@ -226,6 +258,7 @@ impl<H> Registry<H> {
         self.handles.remove(id);
         self.crashed.remove(id);
         self.unread.remove(id);
+        self.playing.remove(id);
         self.hidden_at.remove(id);
         if self.active.as_deref() == Some(id) {
             self.active = None;
@@ -327,6 +360,7 @@ mod tests {
         assert_eq!(visible, reg.active.iter().cloned().collect::<Vec<_>>(), "visible webviews != active service");
         assert!(reg.crashed.iter().all(|id| reg.handles.contains_key(id)), "crashed without a handle");
         assert!(reg.unread.keys().all(|id| reg.handles.contains_key(id)), "unread without a handle");
+        assert!(reg.playing.iter().all(|id| reg.handles.contains_key(id)), "playing without a handle");
         assert!(reg.hidden_at.keys().all(|id| reg.handles.contains_key(id)), "hidden_at without a handle");
         for s in reg.snapshot(&SVCS) {
             if s.state == Lifecycle::Suspended {
@@ -580,10 +614,33 @@ mod tests {
         assert_consistent(&reg, &fake);
     }
 
+    #[test]
+    fn playing_follows_reports_and_is_dropped_on_unload() {
+        let (mut reg, fake) = (Registry::default(), Fake::default());
+        let id = svc(0).id();
+        let playing = |reg: &Registry<String>| reg.snapshot(&SVCS)[0].playing_audio;
+        assert!(!reg.set_playing(id, true, |_| true), "unloaded: ignored");
+        reg.activate(&fake, svc(0)).unwrap();
+        assert!(reg.set_playing(id, true, |_| true));
+        assert!(!reg.set_playing(id, true, |_| true));
+        assert!(!reg.set_playing(id, false, |_| false), "stale webview: ignored");
+        assert!(playing(&reg));
+        reg.activate(&fake, svc(1)).unwrap();
+        assert!(playing(&reg), "still playing in the background");
+        reg.unload(&fake, id).unwrap();
+        assert!(!playing(&reg));
+        assert_consistent(&reg, &fake);
+    }
+
     const MIN: Duration = Duration::from_secs(60);
 
-    fn policy(idle_min: Option<u32>, max_suspended: Option<usize>) -> Hibernation {
-        Hibernation { idle: idle_min.map(|m| m * MIN), max_suspended }
+    /// Every service on the same rule (`None`: no idle limit), and the cap.
+    fn policy(idle_min: Option<u32>, max_suspended: Option<usize>) -> (Hibernate, Option<usize>) {
+        (idle_min.map_or(Hibernate::OverCap, |m| Hibernate::After(m * MIN)), max_suspended)
+    }
+
+    fn select_uniform(suspended: Vec<(&str, Instant)>, now: Instant, (rule, cap): (Hibernate, Option<usize>)) -> Vec<&str> {
+        select_hibernation(suspended.into_iter().map(|(id, t)| (id, t, rule)).collect(), now, cap)
     }
 
     #[test]
@@ -591,7 +648,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |min: u32| t0 + min * MIN;
         let suspended = || vec![("c", at(10)), ("a", at(0)), ("b", at(5))];
-        let pick = |now, p| select_hibernation(suspended(), now, p);
+        let pick = |now, p| select_uniform(suspended(), now, p);
 
         assert_eq!(pick(at(14), policy(Some(15), None)), Vec::<&str>::new());
         assert_eq!(pick(at(15), policy(Some(15), None)), ["a"], "the limit itself counts as idle");
@@ -607,7 +664,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |min: u32| t0 + min * MIN;
         let suspended = || vec![("c", at(10)), ("a", at(0)), ("b", at(5))];
-        let pick = |p| select_hibernation(suspended(), at(11), p);
+        let pick = |p| select_uniform(suspended(), at(11), p);
 
         assert_eq!(pick(policy(None, Some(3))), Vec::<&str>::new());
         assert_eq!(pick(policy(None, Some(2))), ["a"], "oldest first");
@@ -615,9 +672,35 @@ mod tests {
         // Both rules: whichever picks more.
         assert_eq!(pick(policy(Some(6), Some(2))), ["a", "b"]);
         assert_eq!(pick(policy(Some(10), Some(1))), ["a", "b"]);
-        assert_eq!(select_hibernation(vec![], at(11), policy(Some(0), Some(0))), Vec::<&str>::new());
+        assert_eq!(select_uniform(vec![], at(11), policy(Some(0), Some(0))), Vec::<&str>::new());
         // Ties are broken by id, not by input order.
-        assert_eq!(select_hibernation(vec![("y", t0), ("x", t0)], t0, policy(None, Some(1))), ["x"]);
+        assert_eq!(select_uniform(vec![("y", t0), ("x", t0)], t0, policy(None, Some(1))), ["x"]);
+    }
+
+    #[test]
+    fn hibernation_by_per_service_rule() {
+        use Hibernate::*;
+        let t0 = Instant::now();
+        let at = |min: u32| t0 + min * MIN;
+        // Oldest first: a (5 min limit), b (kept alive), c (cap only), d (60 min limit), e (5 min limit).
+        let suspended = || {
+            vec![
+                ("e", at(30), After(5 * MIN)),
+                ("a", at(0), After(5 * MIN)),
+                ("b", at(1), Never),
+                ("c", at(2), OverCap),
+                ("d", at(3), After(60 * MIN)),
+            ]
+        };
+        let pick = |now, cap| select_hibernation(suspended(), now, cap);
+        assert_eq!(pick(at(10), None), ["a"], "only a's limit has passed");
+        assert_eq!(pick(at(40), None), ["a", "e"], "not a prefix: d is older than e but has longer");
+        assert_eq!(pick(at(63), None), ["a", "d", "e"]);
+        assert_eq!(pick(at(600), None), ["a", "d", "e"], "never b, c only for the cap");
+        // Cap 1 of c, d, e once a is gone: the oldest of those go, b is not counted.
+        assert_eq!(pick(at(10), Some(1)), ["a", "c", "d"]);
+        assert_eq!(pick(at(40), Some(1)), ["a", "c", "e"]);
+        assert_eq!(pick(at(40), Some(0)), ["a", "c", "d", "e"]);
     }
 
     #[test]
@@ -629,7 +712,9 @@ mod tests {
         // 0, 1, 2 suspended (in that order), 3 active; 1 crashes, 2 is kept alive.
         crash(&mut reg, svc(1).id());
         let later = Instant::now() + 60 * MIN;
-        let pick = |reg: &Registry<String>, p| reg.hibernation_candidates(later, p, |id| id != svc(2).id());
+        let pick = |reg: &Registry<String>, (rule, cap)| {
+            reg.hibernation_candidates(later, cap, |id| if id == svc(2).id() { Hibernate::Never } else { rule })
+        };
         assert_eq!(pick(&reg, policy(Some(15), None)), [svc(0).id()]);
         assert_eq!(pick(&reg, policy(None, Some(0))), [svc(0).id()]);
         assert_eq!(pick(&reg, policy(None, None)), Vec::<String>::new());
@@ -637,7 +722,7 @@ mod tests {
         // Coming back to the front resets the clock.
         reg.activate(&fake, svc(0)).unwrap();
         assert_eq!(pick(&reg, policy(Some(15), None)), [svc(3).id()]);
-        assert!(reg.hibernation_candidates(Instant::now(), policy(Some(15), None), |_| true).is_empty());
+        assert!(reg.hibernation_candidates(Instant::now(), None, |_| Hibernate::After(15 * MIN)).is_empty());
 
         reg.unload(&fake, svc(3).id()).unwrap();
         assert_eq!(pick(&reg, policy(Some(15), None)), Vec::<String>::new());
@@ -663,7 +748,7 @@ mod tests {
                 fake.fail_on(OPS[next(OPS.len())], svc(next(n)).id());
             }
             let s = svc(next(n));
-            let _ = match next(7) {
+            let _ = match next(8) {
                 0 | 1 => reg.unload(&fake, s.id()),
                 2 => {
                     crash(&mut reg, s.id());
@@ -671,6 +756,10 @@ mod tests {
                 }
                 3 => {
                     reg.set_unread(s.id(), next(3) as u32, |_| true);
+                    Ok(())
+                }
+                4 => {
+                    reg.set_playing(s.id(), next(2) == 0, |_| true);
                     Ok(())
                 }
                 _ => reg.activate(&fake, s),

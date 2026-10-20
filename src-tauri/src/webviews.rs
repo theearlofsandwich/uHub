@@ -3,17 +3,19 @@
 //! and CRASHED when WebKit reports the web process died.
 //!
 //! Service pages have no IPC. What they report reaches us through native
-//! webview events instead (platform/): the title (unread badge), web
-//! notifications (sent on as desktop notifications) and permission requests
-//! (decided by the instance's policy, see `Service::allows`). Not every
-//! platform reports all of them, see platform/mod.rs.
+//! webview events instead (platform/): the title (unread badge), whether audio
+//! is playing (media indicator), web notifications (sent on as desktop
+//! notifications) and permission requests (decided by the instance's policy,
+//! see `Service::allows`). Not every platform reports all of them, see
+//! platform/mod.rs.
 //!
 //! Hibernation: a background task unloads SUSPENDED services that aren't kept
-//! alive once they have been idle too long or exceed the background limit
-//! (`Settings`), taking the same lock as every switch so it can't race one.
+//! alive once they have been idle longer than their own or the app-wide limit,
+//! or exceed the background cap (`Settings`), taking the same lock as every
+//! switch so it can't race one.
 //!
 //! Also hosts the commands that edit the service configuration and settings
-//! (services.rs).
+//! (services.rs), and the ones behind the shell's "Add app" modal.
 //!
 //! Every change is pushed to the shell as a "services-changed" event carrying
 //! the full snapshot, emitted while the registry lock is held so events arrive
@@ -21,10 +23,11 @@
 
 use crate::{
     error::{Error, Result},
-    lifecycle::{Backend, Hibernation, Registry},
+    favicon::{self, SiteInfo},
+    lifecycle::{Backend, Hibernate, Registry},
     navigation,
     platform::{self, ServiceEvents},
-    services::{self, Config, PermissionKind, RecipeInfo, Service, ServiceInfo, Settings},
+    services::{self, Config, NewService, PermissionKind, RecipeInfo, Service, ServiceInfo, Settings},
     tray,
 };
 use std::{
@@ -97,10 +100,10 @@ fn profile_dir<R: Runtime>(app: &AppHandle<R>, profile: &str) -> Result<PathBuf>
 }
 
 /// Push the current state to the shell (and only the shell), and the unread
-/// total to the tray.
+/// total of the services that show it to the tray.
 fn emit_snapshot<R: Runtime>(app: &AppHandle<R>, inner: &Inner) {
     let snapshot = inner.reg.snapshot(inner.config.services());
-    tray::show_unread(app, snapshot.iter().fold(0, |n: u32, s| n.saturating_add(s.unread)));
+    tray::show_unread(app, snapshot.iter().filter(|s| s.unread_badge).fold(0, |n: u32, s| n.saturating_add(s.unread)));
     if let Err(e) = app.emit_to(EventTarget::webview("shell"), SERVICES_CHANGED, snapshot) {
         log::error!("emitting {SERVICES_CHANGED} failed: {e}");
     }
@@ -129,6 +132,19 @@ fn on_unread<R: Runtime>(app: &AppHandle<R>, id: String, generation: u64, count:
         let state = app.state::<Services>();
         let mut inner = state.0.lock().await;
         if inner.reg.set_unread(&id, count, |h| h.generation == generation) {
+            emit_snapshot(&app, &inner);
+        }
+    });
+}
+
+/// Main thread (audio started or stopped): handed off like `on_unread`.
+fn on_playing_audio<R: Runtime>(app: &AppHandle<R>, id: String, generation: u64, playing: bool) {
+    log::debug!("[{id}] playing audio: {playing}");
+    let app = app.clone();
+    async_runtime::spawn(async move {
+        let state = app.state::<Services>();
+        let mut inner = state.0.lock().await;
+        if inner.reg.set_playing(&id, playing, |h| h.generation == generation) {
             emit_snapshot(&app, &inner);
         }
     });
@@ -193,11 +209,22 @@ impl<R: Runtime> ServiceEvents for Reporter<R> {
     }
 
     fn notification(&self, title: String, body: String) {
-        on_show_notification(&self.app, self.svc.id().to_owned(), title, body);
+        // The permission was denied, so the page shouldn't get here; if it does, drop it.
+        if self.svc.allows(PermissionKind::Notifications) {
+            on_show_notification(&self.app, self.svc.id().to_owned(), title, body);
+        }
     }
 
     fn permission(&self, kind: PermissionKind) -> bool {
         on_permission_request(&self.svc, kind)
+    }
+
+    fn watches_audio(&self) -> bool {
+        self.svc.instance.media_indicator
+    }
+
+    fn playing_audio(&self, playing: bool) {
+        on_playing_audio(&self.app, self.svc.id().to_owned(), self.generation, playing);
     }
 }
 
@@ -212,12 +239,13 @@ fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>
     let log_id = id.clone();
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     let events = Arc::new(Reporter { app: app.clone(), svc: svc.clone(), generation, last_unread: Default::default() });
+    let links_inside = svc.instance.open_links_inside.then(|| data_dir.clone());
     let mut builder = WebviewBuilder::new(label(&id), WebviewUrl::External(url))
         // Distinct directory => distinct WebKit WebContext + WebsiteDataManager.
         .data_directory(data_dir)
         .initialization_script(svc.init_script())
-        .on_navigation(navigation::on_navigation(id.clone(), svc.allowed_domains()))
-        .on_new_window(navigation::on_new_window(app.clone(), id.clone()))
+        .on_navigation(navigation::on_navigation(id.clone(), svc.allowed_domains().to_vec()))
+        .on_new_window(navigation::on_new_window(app.clone(), id.clone(), links_inside))
         .on_page_load(move |_wv, p| match p.event() {
             PageLoadEvent::Started => log::debug!("[{log_id}] load started: {}", p.url()),
             PageLoadEvent::Finished => log::debug!("[{log_id}] load finished: {}", p.url()),
@@ -234,7 +262,7 @@ fn create<R: Runtime>(app: &AppHandle<R>, svc: &Service) -> Result<SvcWebview<R>
         .add_child(builder, LogicalPosition::new(0., 0.), LogicalSize::new(1., 1.))
         .map_err(|e| Error::CreateFailed(format!("add_child failed: {e}")))?;
     // From here on the label is taken: don't leak the webview on failure.
-    if let Err(e) = platform::attach_service(&webview, events) {
+    if let Err(e) = platform::attach_service(&webview, events, !svc.instance.audio) {
         log::error!("[{id}] placing webview failed, closing it: {e}");
         if let Err(e) = webview.close() {
             log::error!("[{id}] close failed: {e}");
@@ -315,11 +343,15 @@ async fn activate(app: &AppHandle, id: &str) -> Result<()> {
 /// How often idle services are looked for.
 const HIBERNATE_CHECK: Duration = Duration::from_secs(60);
 
-fn hibernation(settings: &Settings) -> Hibernation {
-    let minutes = settings.hibernate_after_minutes;
-    Hibernation {
-        idle: (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60)),
-        max_suspended: settings.max_suspended.map(|n| n as usize),
+/// When `svc` is unloaded in the background: never if kept alive, else after
+/// its own delay or the app-wide one (0: only to stay within the cap).
+fn hibernation(svc: &Service, settings: &Settings) -> Hibernate {
+    if svc.keep_alive() {
+        return Hibernate::Never;
+    }
+    match svc.instance.hibernate_after_minutes.unwrap_or(settings.hibernate_after_minutes) {
+        0 => Hibernate::OverCap,
+        minutes => Hibernate::After(Duration::from_secs(u64::from(minutes) * 60)),
     }
 }
 
@@ -327,8 +359,10 @@ fn hibernation(settings: &Settings) -> Hibernation {
 /// were. The caller holds the lock and emits the snapshot.
 fn hibernate(app: &AppHandle, inner: &mut Inner) -> bool {
     let config = &inner.config;
-    let ids = inner.reg.hibernation_candidates(Instant::now(), hibernation(config.settings()), |id| {
-        config.find(id).is_none_or(|s| !s.keep_alive())
+    let cap = config.settings().max_suspended.map(|n| n as usize);
+    let ids = inner.reg.hibernation_candidates(Instant::now(), cap, |id| {
+        // A webview whose service is gone from the config goes right away.
+        config.find(id).map_or(Hibernate::After(Duration::ZERO), |s| hibernation(s, config.settings()))
     });
     let mut changed = false;
     for id in ids {
@@ -415,20 +449,31 @@ pub async fn unload_service(
     result
 }
 
-/// Add an (unloaded) instance of a recipe with its own fresh profile; returns its id.
+/// Add an (unloaded) app with its own fresh profile; returns its id.
 #[tauri::command]
-pub async fn add_service(
-    app: AppHandle,
-    state: State<'_, Services>,
-    recipe_id: String,
-    name: String,
-) -> Result<String> {
+pub async fn add_service(app: AppHandle, state: State<'_, Services>, service: NewService) -> Result<String> {
     let root = profiles_root(&app)?;
     let mut inner = state.0.lock().await;
-    let id = inner.config.add(&recipe_id, &name, |p| root.join(p).exists())?;
-    log::info!("[{id}] added ({recipe_id})");
+    let id = inner.config.add(&service, |p| root.join(p).exists())?;
+    log::info!("[{id}] added ({})", service.url);
     emit_snapshot(&app, &inner);
     Ok(id)
+}
+
+/// The title and icon of the site at `url`, for the "Add app" form.
+#[tauri::command]
+pub async fn inspect_site(url: String) -> Result<SiteInfo> {
+    async_runtime::spawn_blocking(move || favicon::inspect(&url))
+        .await
+        .map_err(|e| Error::Fetch(format!("inspecting the site failed: {e}")))?
+}
+
+/// The shell covers the whole window while it shows a modal (`open`), see
+/// `platform::set_overlay`.
+#[tauri::command]
+pub async fn set_overlay(app: AppHandle, open: bool) -> Result<()> {
+    let shell = app.get_webview("shell").ok_or(Error::WebviewMissing)?;
+    Ok(platform::set_overlay(&shell, open)?)
 }
 
 /// Destroy the webview and drop the service from the config. With

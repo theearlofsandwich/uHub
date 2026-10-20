@@ -19,6 +19,9 @@ pub enum Error {
     /// A config value or command argument that failed validation.
     #[error("{0}")]
     InvalidConfig(String),
+    /// Loading something from the web failed (see favicon.rs).
+    #[error("{0}")]
+    Fetch(String),
     #[error("{context}: {source}")]
     Io { context: String, source: io::Error },
     #[error(transparent)]
@@ -44,6 +47,7 @@ impl Error {
             Self::WebviewMissing => "webviewMissing",
             Self::CreateFailed(_) => "createFailed",
             Self::InvalidConfig(_) => "invalidConfig",
+            Self::Fetch(_) => "fetch",
             Self::Io { .. } => "io",
             Self::Tauri(_) => "tauri",
         }

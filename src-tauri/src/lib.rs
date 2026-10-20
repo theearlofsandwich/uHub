@@ -1,5 +1,6 @@
 mod badge;
 mod error;
+mod favicon;
 mod lifecycle;
 mod navigation;
 mod platform;
@@ -25,6 +26,8 @@ pub fn run() {
             webviews::unload_service,
             webviews::list_recipes,
             webviews::add_service,
+            webviews::inspect_site,
+            webviews::set_overlay,
             webviews::remove_service,
             webviews::rename_service,
             webviews::reorder_services,
@@ -50,13 +53,19 @@ pub fn run() {
             }
 
             let window = WindowBuilder::new(app, "main")
-                .title("WebDeck")
+                .title("uHub")
                 .inner_size(1280., 800.)
                 .min_inner_size(640., 400.)
                 .build()?;
 
             // The trusted React shell: the only webview that gets IPC (see capabilities/default.json).
+            // Transparent, so a service shows through while the shell covers it
+            // with a modal (platform::set_overlay); the sidebar paints its own
+            // background. No native drag-and-drop handler, so the page gets
+            // HTML5 drops (custom app icons).
             let shell = WebviewBuilder::new("shell", WebviewUrl::App("index.html".into()))
+                .transparent(true)
+                .disable_drag_drop_handler()
                 .on_navigation(|url| {
                     let ok = navigation::shell_navigation_allowed(url);
                     if !ok {

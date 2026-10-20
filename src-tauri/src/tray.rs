@@ -31,7 +31,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>, close_to_tray: bool) -> tauri::Resu
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("WebDeck")
+        .tooltip("uHub")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => toggle_window(app),
             "quit" => app.exit(0),
@@ -99,7 +99,7 @@ pub fn show_unread<R: Runtime>(app: &AppHandle<R>, total: u32) {
     if SHOWN_UNREAD.swap(total, Ordering::Relaxed) == total {
         return;
     }
-    let tooltip = if total == 0 { "WebDeck".to_owned() } else { format!("WebDeck: {total} unread") };
+    let tooltip = if total == 0 { "uHub".to_owned() } else { format!("uHub: {total} unread") };
     let title = (total > 0).then(|| total.to_string());
     if let Err(e) = tray.set_tooltip(Some(tooltip)).and_then(|()| tray.set_title(title)) {
         log::warn!("updating tray failed: {e}");
