@@ -18,12 +18,19 @@ interface Props {
   onClose: () => void;
 }
 
-const HIBERNATE_OPTIONS = [
-  { minutes: 5, label: "5 minutes" },
-  { minutes: 15, label: "15 minutes" },
-  { minutes: 30, label: "30 minutes" },
-  { minutes: 60, label: "1 hour" },
-];
+/** Must match MAX_HIBERNATE_MINUTES in src-tauri/src/services.rs: a week. */
+const MAX_DELAY_SECONDS = 7 * 24 * 60 * 60;
+
+/** Typed minutes (fractions allowed: 0.5 is 30 seconds) as whole seconds, or null if out of range. */
+function minutesToSeconds(text: string): number | null {
+  const seconds = Math.round(Number(text.trim()) * 60);
+  return text.trim() !== "" && seconds >= 1 && seconds <= MAX_DELAY_SECONDS ? seconds : null;
+}
+
+/** Seconds as minutes to type over, e.g. 90 -> "1.5". */
+function secondsToMinutes(seconds: number): string {
+  return String(Math.round((seconds / 60) * 100) / 100);
+}
 
 /** Must match MAX_ICON_LEN in src-tauri/src/services.rs. */
 const MAX_ICON_LEN = 256 * 1024;
@@ -32,7 +39,21 @@ const ICON_SIZE = 128;
 /** Wait for typing to pause before fetching the site. */
 const INSPECT_DELAY_MS = 600;
 
-type Options = Omit<NewService, "name" | "recipe" | "team" | "url" | "icon">;
+type Options = Omit<
+  NewService,
+  "name" | "recipe" | "team" | "url" | "icon" | "hibernateAfterSeconds" | "autoWakeSeconds" | "hibernateAfterWakeSeconds"
+>;
+
+/** The delay boxes, in minutes as typed; a blank auto-wake is off. */
+interface Delays {
+  hibernateAfter: string;
+  autoWake: string;
+  hibernateAfterWake: string;
+}
+
+const DEFAULT_DELAYS: Delays = { hibernateAfter: "15", autoWake: "", hibernateAfterWake: "1" };
+/** What an unused, invalid box is sent as (the defaults above). */
+const FALLBACK_SECONDS = { hibernateAfter: 15 * 60, hibernateAfterWake: 60 };
 
 const DEFAULTS: Options = {
   notifications: true,
@@ -42,7 +63,6 @@ const DEFAULTS: Options = {
   enabled: true,
   // A hibernated app sends no notifications, so it's opt-in.
   hibernation: false,
-  hibernateAfterMinutes: 15,
   openLinksInside: false,
   startHibernated: false,
 };
@@ -56,9 +76,18 @@ function optionsOf(s: Service): Options {
     unreadBadge: s.unreadBadge,
     enabled: s.enabled,
     hibernation: !s.keepAlive,
-    hibernateAfterMinutes: s.hibernateAfterMinutes ?? DEFAULTS.hibernateAfterMinutes,
     openLinksInside: s.openLinksInside,
     startHibernated: s.startHibernated,
+  };
+}
+
+/** The delay boxes as `s` has them. */
+function delaysOf(s: Service): Delays {
+  const minutes = (seconds: number | null, fallback: string) => (seconds === null ? fallback : secondsToMinutes(seconds));
+  return {
+    hibernateAfter: minutes(s.hibernateAfterSeconds, DEFAULT_DELAYS.hibernateAfter),
+    autoWake: minutes(s.autoWakeSeconds, DEFAULT_DELAYS.autoWake),
+    hibernateAfterWake: minutes(s.hibernateAfterWakeSeconds, DEFAULT_DELAYS.hibernateAfterWake),
   };
 }
 
@@ -151,6 +180,7 @@ export function AppModal({ recipe: initialRecipe, recipes, service, onSubmit, on
   );
   const [iconError, setIconError] = useState<string | null>(null);
   const [opts, setOpts] = useState<Options>(service ? optionsOf(service) : DEFAULTS);
+  const [delays, setDelays] = useState<Delays>(service ? delaysOf(service) : DEFAULT_DELAYS);
   const [site, setSite] = useState<Site>({ status: "idle" });
   const [submitting, setSubmitting] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
@@ -159,12 +189,15 @@ export function AppModal({ recipe: initialRecipe, recipes, service, onSubmit, on
   const titleId = useId();
   const isCustom = recipe.id === CUSTOM;
   const title = service ? "Edit app" : isCustom ? "Add website" : `Add ${recipe.name}`;
-  // An edited app may have a delay the presets don't offer.
-  const hibernateOptions = HIBERNATE_OPTIONS.some((o) => o.minutes === opts.hibernateAfterMinutes)
-    ? HIBERNATE_OPTIONS
-    : [...HIBERNATE_OPTIONS, { minutes: opts.hibernateAfterMinutes, label: `${opts.hibernateAfterMinutes} minutes` }].sort(
-        (a, b) => a.minutes - b.minutes,
-      );
+  const hibernateAfterSeconds = minutesToSeconds(delays.hibernateAfter);
+  const autoWakeOn = delays.autoWake.trim() !== "";
+  const autoWakeSeconds = autoWakeOn ? minutesToSeconds(delays.autoWake) : null;
+  const hibernateAfterWakeSeconds = minutesToSeconds(delays.hibernateAfterWake);
+  // Only boxes in use need a valid value; the others are sent as they were.
+  const delaysOk =
+    !opts.hibernation ||
+    (hibernateAfterSeconds !== null && (!autoWakeOn || (autoWakeSeconds !== null && hibernateAfterWakeSeconds !== null)));
+  const setDelay = (key: keyof Delays) => (value: string) => setDelays((d) => ({ ...d, [key]: value }));
 
   const url = recipe.team ? null : normalizeUrl(address);
   // Blank is the recipe's own address, unless it has none.
@@ -221,10 +254,13 @@ export function AppModal({ recipe: initialRecipe, recipes, service, onSubmit, on
     }
   };
   const submit = async () => {
-    if (!addressOk || submitting) return;
+    if (!addressOk || !delaysOk || submitting) return;
     await busy(() =>
       onSubmit({
         ...opts,
+        hibernateAfterSeconds: hibernateAfterSeconds ?? FALLBACK_SECONDS.hibernateAfter,
+        autoWakeSeconds,
+        hibernateAfterWakeSeconds: hibernateAfterWakeSeconds ?? FALLBACK_SECONDS.hibernateAfterWake,
         name: name.trim() || fallbackName,
         recipe: recipe.id,
         team: recipe.team ? team.trim() : null,
@@ -378,20 +414,31 @@ export function AppModal({ recipe: initialRecipe, recipes, service, onSubmit, on
               checked={opts.hibernation}
               onChange={set("hibernation")}
             />
-            <label className={"row-field" + (opts.hibernation ? "" : " disabled")}>
-              <span>Hibernate after</span>
-              <select
-                value={opts.hibernateAfterMinutes}
-                disabled={!opts.hibernation}
-                onChange={(e) => set("hibernateAfterMinutes")(Number(e.target.value))}
-              >
-                {hibernateOptions.map((o) => (
-                  <option key={o.minutes} value={o.minutes}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MinutesField
+              label="Hibernate after"
+              hint="Minutes in the background; 0.5 is 30 seconds"
+              value={delays.hibernateAfter}
+              disabled={!opts.hibernation}
+              invalid={hibernateAfterSeconds === null}
+              onChange={setDelay("hibernateAfter")}
+            />
+            <MinutesField
+              label="Auto-wake every"
+              hint="Loads the hibernated app in the background, so it can sync and send notifications. Blank is off"
+              value={delays.autoWake}
+              placeholder="Off"
+              disabled={!opts.hibernation}
+              invalid={autoWakeOn && autoWakeSeconds === null}
+              onChange={setDelay("autoWake")}
+            />
+            <MinutesField
+              label="Hibernate after auto-wake"
+              hint="How long a woken app stays loaded, unless you switch to it"
+              value={delays.hibernateAfterWake}
+              disabled={!opts.hibernation || !autoWakeOn}
+              invalid={hibernateAfterWakeSeconds === null}
+              onChange={setDelay("hibernateAfterWake")}
+            />
             <Switch
               label="Start hibernated"
               hint="Stays unloaded when uHub starts, until you open it. Otherwise it loads in the background"
@@ -459,7 +506,7 @@ export function AppModal({ recipe: initialRecipe, recipes, service, onSubmit, on
               <button type="button" className="button" onClick={onClose} disabled={submitting}>
                 Cancel
               </button>
-              <button type="submit" className="button primary" disabled={!addressOk || submitting}>
+              <button type="submit" className="button primary" disabled={!addressOk || !delaysOk || submitting}>
                 {service ? (submitting ? "Saving…" : "Save") : submitting ? "Adding…" : "Add app"}
               </button>
             </>
@@ -516,6 +563,48 @@ export function Section({ title, children }: { title: string; children: ReactNod
       <legend>{title}</legend>
       {children}
     </fieldset>
+  );
+}
+
+/** A row with a number box in minutes. `invalid` is only shown while enabled. */
+function MinutesField({
+  label,
+  hint,
+  value,
+  placeholder,
+  disabled,
+  invalid,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  placeholder?: string;
+  disabled: boolean;
+  invalid: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className={"row-field" + (disabled ? " disabled" : "")}>
+      <span>
+        {label}
+        <small>{hint}</small>
+      </span>
+      <span className="minutes-field">
+        <input
+          type="number"
+          inputMode="decimal"
+          min={0}
+          step="any"
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-invalid={!disabled && invalid}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        min
+      </span>
+    </label>
   );
 }
 

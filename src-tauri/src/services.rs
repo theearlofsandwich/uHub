@@ -376,10 +376,18 @@ pub struct Instance {
     /// Never hibernate this service; `None` means the recipe's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<bool>,
-    /// Hibernate after this many minutes in the background instead of the
+    /// Hibernate after this many seconds in the background instead of the
     /// app-wide `Settings::hibernate_after_minutes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hibernate_after_minutes: Option<u32>,
+    pub hibernate_after_seconds: Option<u32>,
+    /// While hibernated, load in the background every this many seconds, so
+    /// it can sync and notify. `None`: stays hibernated until switched to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_wake_seconds: Option<u32>,
+    /// Hibernate this many seconds after an auto-wake (unless switched to
+    /// meanwhile); `None`: as after any other time in the background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernate_after_wake_seconds: Option<u32>,
     /// A base64 `data:image/...` URL; `None` means the recipe's icon, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
@@ -423,7 +431,9 @@ impl Instance {
         self.enabled = new.enabled;
         self.permissions.notifications = new.notifications;
         self.keep_alive = Some(!new.hibernation);
-        self.hibernate_after_minutes = Some(new.hibernate_after_minutes);
+        self.hibernate_after_seconds = Some(new.hibernate_after_seconds);
+        self.auto_wake_seconds = new.auto_wake_seconds;
+        self.hibernate_after_wake_seconds = Some(new.hibernate_after_wake_seconds);
         self.icon = new.icon.clone();
         self.audio = new.audio;
         self.media_indicator = new.media_indicator;
@@ -446,7 +456,9 @@ impl Instance {
             order,
             permissions: Permissions::default(),
             keep_alive: None,
-            hibernate_after_minutes: None,
+            hibernate_after_seconds: None,
+            auto_wake_seconds: None,
+            hibernate_after_wake_seconds: None,
             icon: None,
             audio: true,
             media_indicator: true,
@@ -477,7 +489,10 @@ pub struct NewService {
     pub enabled: bool,
     /// `false`: kept alive (see `Instance::keep_alive`).
     pub hibernation: bool,
-    pub hibernate_after_minutes: u32,
+    pub hibernate_after_seconds: u32,
+    /// `None`: no auto-wake (see `Instance::auto_wake_seconds`).
+    pub auto_wake_seconds: Option<u32>,
+    pub hibernate_after_wake_seconds: u32,
     pub open_links_inside: bool,
     pub start_hibernated: bool,
 }
@@ -809,8 +824,15 @@ impl Service {
         if let Some(icon) = &instance.icon {
             validate_icon(icon)?;
         }
-        if instance.hibernate_after_minutes.is_some_and(|m| m == 0 || m > MAX_HIBERNATE_MINUTES) {
-            return Err(Error::invalid("hibernate after must be between a minute and a week"));
+        let out_of_range = |s: Option<u32>| s.is_some_and(|s| s == 0 || s > MAX_HIBERNATE_MINUTES * 60);
+        if out_of_range(instance.hibernate_after_seconds) {
+            return Err(Error::invalid("hibernate after must be between a second and a week"));
+        }
+        if out_of_range(instance.auto_wake_seconds) {
+            return Err(Error::invalid("auto-wake must be between a second and a week"));
+        }
+        if out_of_range(instance.hibernate_after_wake_seconds) {
+            return Err(Error::invalid("hibernate after auto-wake must be between a second and a week"));
         }
         Ok(Self { instance, recipe, url: url.into(), allowed })
     }
@@ -1230,12 +1252,19 @@ pub struct ServiceInfo {
     pub enabled: bool,
     pub icon: Option<String>,
     pub state: Lifecycle,
+    /// On screen: active (or crashed there), or hibernated there with the
+    /// shell's placeholder in its place (`Registry::hibernate_active`).
+    pub shown: bool,
     /// From the page title (see badge.rs); 0 while unloaded.
     pub unread: u32,
     /// Never hibernated (the instance's setting or the recipe's default).
     pub keep_alive: bool,
     /// `None`: the app-wide `Settings::hibernate_after_minutes`.
-    pub hibernate_after_minutes: Option<u32>,
+    pub hibernate_after_seconds: Option<u32>,
+    /// `None`: no auto-wake.
+    pub auto_wake_seconds: Option<u32>,
+    /// `None`: as after any other time in the background.
+    pub hibernate_after_wake_seconds: Option<u32>,
     pub notifications: bool,
     pub audio: bool,
     pub media_indicator: bool,
@@ -1403,7 +1432,9 @@ mod tests {
             unread_badge: true,
             enabled: true,
             hibernation: true,
-            hibernate_after_minutes: 15,
+            hibernate_after_seconds: 15 * 60,
+            auto_wake_seconds: None,
+            hibernate_after_wake_seconds: 60,
             open_links_inside: false,
             start_hibernated: false,
         }
@@ -1571,7 +1602,9 @@ mod tests {
         opts.icon = Some("data:image/png;base64,iVBORw0KGgo=".into());
         opts.audio = false;
         opts.hibernation = false;
-        opts.hibernate_after_minutes = 30;
+        opts.hibernate_after_seconds = 30;
+        opts.auto_wake_seconds = Some(600);
+        opts.hibernate_after_wake_seconds = 90;
         opts.open_links_inside = true;
         opts.start_hibernated = true;
         opts.enabled = false;
@@ -1589,13 +1622,20 @@ mod tests {
         let inst = &reloaded.find(&id).unwrap().instance;
         assert_eq!(inst, &slack.instance);
         assert!(!inst.audio && !inst.enabled && inst.open_links_inside && inst.start_hibernated);
-        assert_eq!(inst.hibernate_after_minutes, Some(30));
+        assert_eq!(inst.hibernate_after_seconds, Some(30));
+        assert_eq!((inst.auto_wake_seconds, inst.hibernate_after_wake_seconds), (Some(600), Some(90)));
 
         let mut bad = new_app("X", CUSTOM, "https://x.example/");
         bad.icon = Some("https://x.example/favicon.ico".into());
         assert!(c.add(&bad, |_| false).is_err(), "remote icon");
         let mut bad = new_app("X", CUSTOM, "https://x.example/");
-        bad.hibernate_after_minutes = 0;
+        bad.hibernate_after_seconds = 0;
+        assert!(c.add(&bad, |_| false).is_err());
+        let mut bad = new_app("X", CUSTOM, "https://x.example/");
+        bad.auto_wake_seconds = Some(0);
+        assert!(c.add(&bad, |_| false).is_err());
+        let mut bad = new_app("X", CUSTOM, "https://x.example/");
+        bad.hibernate_after_wake_seconds = 0;
         assert!(c.add(&bad, |_| false).is_err());
         assert!(c.add(&new_app("X", CUSTOM, "https://user:pw@x.example/"), |_| false).is_err());
     }

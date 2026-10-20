@@ -30,7 +30,7 @@ interface Props {
 }
 
 /** Icon edge in px. The bar's thickness follows from it: `bar_thickness` in src-tauri/src/platform/mod.rs. */
-const iconPx: Record<IconSize, number> = {
+export const iconPx: Record<IconSize, number> = {
   "extra-small": 16,
   small: 20,
   medium: 28,
@@ -137,7 +137,7 @@ export function Sidebar({
         {arrange(services, order).map((s) => (
           <li key={s.id} data-id={s.id} className={s.id === dragging ? "dragged" : undefined}>
             <button
-              className={"service" + (s.state === "active" ? " selected" : "")}
+              className={"service" + (s.shown ? " selected" : "")}
               // Not `disabled`: that would swallow the right-click that re-enables it.
               aria-disabled={!s.enabled}
               aria-label={showLabels ? undefined : s.name}
@@ -163,7 +163,7 @@ export function Sidebar({
             >
               <span className={s.icon ? "service-icon has-image" : "service-icon"}>
                 {s.icon ? <img src={s.icon} alt="" draggable={false} /> : <span className="icon-letter">{s.name[0]?.toUpperCase()}</span>}
-                <span className={"dot " + s.state} />
+                {s.state === "crashed" && <span className="dot crashed" />}
               </span>
               {showLabels && <span className="name">{s.name}</span>}
               {s.mediaIndicator && s.playingAudio && (

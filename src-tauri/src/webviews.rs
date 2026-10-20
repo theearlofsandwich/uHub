@@ -14,7 +14,13 @@
 //! Hibernation: a background task unloads SUSPENDED services that aren't kept
 //! alive once they have been idle longer than their own or the app-wide limit,
 //! or exceed the background cap (`Settings`), taking the same lock as every
-//! switch so it can't race one.
+//! switch so it can't race one. The same task wakes hibernated services that
+//! have auto-wake on: each is loaded in the background every so often, so it
+//! can sync and send notifications, then hibernated again after its own
+//! "after auto-wake" delay. Turning hibernation on or off takes effect at
+//! once: a service hibernated while on screen leaves a placeholder ("App
+//! hibernated", drawn by the shell, which covers the window meanwhile) until
+//! it or another is switched to.
 //!
 //! Also hosts the commands that edit the service configuration and settings
 //! (services.rs) and whether uHub starts at login, the ones behind the shell's "Add app" and "Edit app" modals,
@@ -28,7 +34,7 @@
 use crate::{
     error::{Error, Result},
     favicon::{self, SiteInfo},
-    lifecycle::{Backend, Hibernate, Registry},
+    lifecycle::{Backend, Hibernate, Registry, Wakes},
     navigation,
     platform::{self, ServiceEvents},
     services::{self, Config, Lifecycle, NewService, PermissionKind, RecipeInfo, Service, ServiceInfo, Settings},
@@ -69,13 +75,14 @@ pub struct Services(Mutex<Inner>);
 struct Inner {
     reg: Registry<SvcWebview>,
     config: Config,
+    wakes: Wakes,
 }
 
 impl Services {
     pub fn load(config_path: PathBuf) -> Result<Self> {
         let config = Config::load(config_path)?;
         AUDIO.store(config.settings().audio, Ordering::Relaxed);
-        Ok(Self(Mutex::new(Inner { reg: Registry::default(), config })))
+        Ok(Self(Mutex::new(Inner { reg: Registry::default(), config, wakes: Wakes::default() })))
     }
 
     /// Before it is shared: the setting the tray starts with.
@@ -109,6 +116,9 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Mirror of `Settings::audio` for `create`, which only gets the service.
 static AUDIO: AtomicBool = AtomicBool::new(true);
 
+/// Whether the shell covers the whole window (`sync_overlay`).
+static EXPANDED: AtomicBool = AtomicBool::new(false);
+
 /// Whether `svc`'s webview is muted: by its own setting or the app-wide one.
 fn muted(svc: &Service) -> bool {
     !(svc.instance.audio && AUDIO.load(Ordering::Relaxed))
@@ -137,6 +147,24 @@ fn emit_snapshot<R: Runtime>(app: &AppHandle<R>, inner: &Inner) {
     if let Err(e) = app.emit_to(EventTarget::webview("shell"), SERVICES_CHANGED, snapshot) {
         log::error!("emitting {SERVICES_CHANGED} failed: {e}");
     }
+    if let Err(e) = sync_overlay(app, inner) {
+        log::error!("laying out the shell failed: {e}");
+    }
+}
+
+/// Let the shell cover the whole window while it shows a modal (shortcuts
+/// are paused then, `set_overlay`) or the placeholder of a service hibernated
+/// on screen, else be the bar. Called with the registry lock held, so the
+/// two can't race.
+fn sync_overlay<R: Runtime>(app: &AppHandle<R>, inner: &Inner) -> Result<()> {
+    let expand = shortcuts::paused() || inner.reg.hibernated_on_screen().is_some();
+    if EXPANDED.load(Ordering::Relaxed) == expand {
+        return Ok(());
+    }
+    let shell = app.get_webview("shell").ok_or(Error::WebviewMissing)?;
+    platform::set_overlay(&shell, expand)?;
+    EXPANDED.store(expand, Ordering::Relaxed);
+    Ok(())
 }
 
 /// Runs on the main thread, so it must not wait for the registry lock (a
@@ -383,12 +411,21 @@ pub fn list_recipes() -> Vec<RecipeInfo> {
     services::recipe_infos()
 }
 
+/// Switch to `id`; if it is hibernated, to its placeholder (see `activate`).
 #[tauri::command]
 pub async fn activate_service(app: AppHandle, id: String) -> Result<()> {
-    activate(&app, &id).await
+    activate(&app, &id, false).await
 }
 
-async fn activate(app: &AppHandle, id: &str) -> Result<()> {
+/// Switch to `id`, loading it even if it is hibernated.
+#[tauri::command]
+pub async fn wake_service(app: AppHandle, id: String) -> Result<()> {
+    activate(&app, &id, true).await
+}
+
+/// Put `id` on screen. Unless `wake`, a hibernated one (unloaded, and not
+/// kept alive) isn't loaded: the shell shows its placeholder instead.
+async fn activate(app: &AppHandle, id: &str, wake: bool) -> Result<()> {
     let state = app.state::<Services>();
     let mut guard = state.0.lock().await;
     let inner = &mut *guard;
@@ -397,7 +434,12 @@ async fn activate(app: &AppHandle, id: &str) -> Result<()> {
         return Err(Error::ServiceDisabled(svc.instance.name.clone()));
     }
     // A failed transition can still have changed state (e.g. restore failed).
-    let result = inner.reg.activate(&Webviews(app), svc);
+    let result = if !wake && inner.reg.handle(id).is_none() && !svc.keep_alive() {
+        inner.reg.show_hibernated(&Webviews(app), id)
+    } else {
+        inner.reg.activate(&Webviews(app), svc)
+    };
+    inner.wakes.forget(id);
     if result.is_ok()
         && let Err(e) = inner.config.set_last_active(id)
     {
@@ -445,29 +487,37 @@ pub async fn reload_service(state: State<'_, Services>, id: String) -> Result<()
     .await
 }
 
-/// How often idle services are looked for.
-const HIBERNATE_CHECK: Duration = Duration::from_secs(60);
+/// How often idle services (and ones due to wake) are looked for: often
+/// enough for the shortest delays (seconds) to be roughly kept.
+const HIBERNATE_CHECK: Duration = Duration::from_secs(5);
 
 /// When `svc` is unloaded in the background: never if kept alive, else after
-/// its own delay or the app-wide one (0: only to stay within the cap).
-fn hibernation(svc: &Service, settings: &Settings) -> Hibernate {
+/// its "after auto-wake" delay if it was only `woken`, else after its own
+/// delay or the app-wide one (0: only to stay within the cap).
+fn hibernation(svc: &Service, settings: &Settings, woken: bool) -> Hibernate {
     if svc.keep_alive() {
         return Hibernate::Never;
     }
-    match svc.instance.hibernate_after_minutes.unwrap_or(settings.hibernate_after_minutes) {
+    if woken && let Some(s) = svc.instance.hibernate_after_wake_seconds {
+        return Hibernate::After(Duration::from_secs(u64::from(s)));
+    }
+    let seconds = svc.instance.hibernate_after_seconds.map_or(u64::from(settings.hibernate_after_minutes) * 60, u64::from);
+    match seconds {
         0 => Hibernate::OverCap,
-        minutes => Hibernate::After(Duration::from_secs(u64::from(minutes) * 60)),
+        s => Hibernate::After(Duration::from_secs(s)),
     }
 }
 
 /// Unload the background services the settings say to; returns whether any
 /// were. The caller holds the lock and emits the snapshot.
 fn hibernate(app: &AppHandle, inner: &mut Inner) -> bool {
-    let config = &inner.config;
+    let (config, wakes) = (&inner.config, &inner.wakes);
     let cap = config.settings().max_suspended.map(|n| n as usize);
     let ids = inner.reg.hibernation_candidates(Instant::now(), cap, |id| {
         // A webview whose service is gone from the config goes right away.
-        config.find(id).map_or(Hibernate::After(Duration::ZERO), |s| hibernation(s, config.settings()))
+        config
+            .find(id)
+            .map_or(Hibernate::After(Duration::ZERO), |s| hibernation(s, config.settings(), wakes.is_woken(id)))
     });
     let mut changed = false;
     for id in ids {
@@ -481,7 +531,31 @@ fn hibernate(app: &AppHandle, inner: &mut Inner) -> bool {
     changed
 }
 
-/// Check for services to hibernate every `HIBERNATE_CHECK`, for the life of the app.
+/// Load, in the background, the hibernated services due to auto-wake; returns
+/// whether any were. Only enabled ones that hibernate at all wake. The
+/// caller holds the lock and emits the snapshot.
+fn auto_wake(app: &AppHandle, inner: &mut Inner) -> bool {
+    let reg = &inner.reg;
+    let services = inner.config.services().iter().map(|s| {
+        let wakes = s.instance.enabled && !s.keep_alive();
+        let period = s.instance.auto_wake_seconds.filter(|_| wakes).map(|s| Duration::from_secs(u64::from(s)));
+        (s.id(), period, reg.handle(s.id()).is_some())
+    });
+    let ids = inner.wakes.due(Instant::now(), services);
+    let mut changed = false;
+    for id in ids {
+        let Some(svc) = inner.config.find(&id) else { continue };
+        log::info!("[{id}] auto-waking");
+        match inner.reg.preload(&Webviews(app), svc) {
+            Ok(()) => changed = true,
+            Err(e) => log::error!("[{id}] auto-waking failed: {e}"),
+        }
+    }
+    changed
+}
+
+/// Check for services to hibernate or wake every `HIBERNATE_CHECK`, for the
+/// life of the app.
 pub fn spawn_hibernation(app: &AppHandle) {
     let app = app.clone();
     async_runtime::spawn(async move {
@@ -491,7 +565,10 @@ pub fn spawn_hibernation(app: &AppHandle) {
             tick.tick().await;
             let state = app.state::<Services>();
             let mut inner = state.0.lock().await;
-            if hibernate(&app, &mut inner) {
+            // Hibernating first: a service due to wake right after being
+            // unloaded is seen asleep from now, and waits its full period.
+            let hibernated = hibernate(&app, &mut inner);
+            if auto_wake(&app, &mut inner) | hibernated {
                 emit_snapshot(&app, &inner);
             }
         }
@@ -506,7 +583,7 @@ pub fn start_services(app: &AppHandle) {
     async_runtime::spawn(async move {
         let id = app.state::<Services>().0.lock().await.config.last_active().map(str::to_owned);
         if let Some(id) = &id
-            && let Err(e) = activate(&app, id).await
+            && let Err(e) = activate(&app, id, true).await
         {
             log::warn!("[{id}] restoring last active service failed: {e}");
         }
@@ -551,7 +628,7 @@ pub fn activate_on_notification_click(app: &AppHandle) -> tauri_plugin_notificat
         log::info!("[{id}] notification clicked");
         let app = handle.clone();
         async_runtime::spawn(async move {
-            if let Err(e) = activate(&app, &id).await {
+            if let Err(e) = activate(&app, &id, false).await {
                 log::error!("[{id}] activating from notification failed: {e}");
             }
             tray::show_window(&app);
@@ -559,19 +636,41 @@ pub fn activate_on_notification_click(app: &AppHandle) -> tauri_plugin_notificat
     })
 }
 
+/// Hibernate `id` now, or wake it, whatever its hibernation setting: it
+/// may hibernate again later, or not at all if kept alive.
 #[tauri::command]
-pub async fn unload_service(
-    app: AppHandle,
-    state: State<'_, Services>,
-    id: String,
-) -> Result<()> {
-    let mut inner = state.0.lock().await;
-    if inner.config.find(&id).is_none() {
-        return Err(services::unknown(&id));
-    }
-    let result = inner.reg.unload(&Webviews(&app), &id);
-    emit_snapshot(&app, &inner);
+pub async fn set_hibernated(app: AppHandle, state: State<'_, Services>, id: String, hibernated: bool) -> Result<()> {
+    let mut guard = state.0.lock().await;
+    let inner = &mut *guard;
+    let result = match inner.config.find(&id) {
+        None => Err(services::unknown(&id)),
+        Some(_) if hibernated => hibernate_now(&app, inner, &id),
+        Some(svc) if !svc.instance.enabled => Err(Error::ServiceDisabled(svc.instance.name.clone())),
+        Some(_) => wake_now(&app, inner, &id),
+    };
+    emit_snapshot(&app, inner);
     result
+}
+
+/// Unload `id`, leaving its placeholder if it is on screen.
+fn hibernate_now(app: &AppHandle, inner: &mut Inner, id: &str) -> Result<()> {
+    log::info!("[{id}] hibernating now");
+    if inner.reg.active_id() == Some(id) {
+        inner.reg.hibernate_active(&Webviews(app))
+    } else {
+        inner.reg.unload(&Webviews(app), id)
+    }
+}
+
+/// Load `id` again: back on screen if its placeholder is, else in the background.
+fn wake_now(app: &AppHandle, inner: &mut Inner, id: &str) -> Result<()> {
+    let svc = inner.config.find(id).ok_or_else(|| services::unknown(id))?;
+    log::info!("[{id}] waking");
+    if inner.reg.hibernated_on_screen() == Some(id) {
+        inner.reg.activate(&Webviews(app), svc)
+    } else {
+        inner.reg.preload(&Webviews(app), svc)
+    }
 }
 
 /// Add an (unloaded) app with its own fresh profile; returns its id.
@@ -594,12 +693,12 @@ pub async fn inspect_site(url: String) -> Result<SiteInfo> {
 }
 
 /// The shell covers the whole window while it shows a modal (`open`), see
-/// `platform::set_overlay`.
+/// `sync_overlay`.
 #[tauri::command]
-pub async fn set_overlay(app: AppHandle, open: bool) -> Result<()> {
-    let shell = app.get_webview("shell").ok_or(Error::WebviewMissing)?;
+pub async fn set_overlay(app: AppHandle, state: State<'_, Services>, open: bool) -> Result<()> {
+    let inner = state.0.lock().await;
     shortcuts::set_paused(open);
-    Ok(platform::set_overlay(&shell, open)?)
+    sync_overlay(&app, &inner)
 }
 
 /// Destroy the webview and drop the service from the config. With
@@ -669,6 +768,7 @@ pub async fn reorder_services(
     Ok(())
 }
 
+/// Takes effect right away, see `apply_keep_alive`.
 #[tauri::command]
 pub async fn set_keep_alive(
     app: AppHandle,
@@ -676,10 +776,30 @@ pub async fn set_keep_alive(
     id: String,
     keep_alive: bool,
 ) -> Result<()> {
-    let mut inner = state.0.lock().await;
-    inner.config.set_keep_alive(&id, keep_alive)?;
-    emit_snapshot(&app, &inner);
-    Ok(())
+    let mut guard = state.0.lock().await;
+    let inner = &mut *guard;
+    let result = set_keep_alive_in(&app, inner, &id, keep_alive);
+    emit_snapshot(&app, inner);
+    result
+}
+
+fn set_keep_alive_in(app: &AppHandle, inner: &mut Inner, id: &str, keep_alive: bool) -> Result<()> {
+    let was_kept_alive = inner.config.find(id).ok_or_else(|| services::unknown(id))?.keep_alive();
+    inner.config.set_keep_alive(id, keep_alive)?;
+    apply_keep_alive(app, inner, id, was_kept_alive)
+}
+
+/// Act on `id`'s hibernation switch if it changed (from `was_kept_alive`):
+/// turned on, it hibernates now, leaving its placeholder if it was on screen;
+/// turned off, it loads again (if enabled), back on screen if its placeholder
+/// is, else in the background.
+fn apply_keep_alive(app: &AppHandle, inner: &mut Inner, id: &str, was_kept_alive: bool) -> Result<()> {
+    let svc = inner.config.find(id).ok_or_else(|| services::unknown(id))?;
+    match (was_kept_alive, svc.keep_alive()) {
+        (true, false) => hibernate_now(app, inner, id),
+        (false, true) if svc.instance.enabled => wake_now(app, inner, id),
+        _ => Ok(()),
+    }
 }
 
 /// Disabling unloads the service; enabling doesn't load it.
@@ -745,7 +865,7 @@ pub async fn update_service(
     let old = inner.config.find(&id).ok_or_else(|| services::unknown(&id))?.clone();
     inner.config.update(&id, &service)?;
     log::info!("[{id}] updated ({})", service.recipe);
-    let result = refresh(&app, inner, &old);
+    let result = refresh(&app, inner, &old).and_then(|()| apply_keep_alive(&app, inner, &id, old.keep_alive()));
     emit_snapshot(&app, inner);
     result
 }
@@ -843,12 +963,12 @@ async fn run_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<()> {
     let to = shortcuts::target(shortcut, &apps, current.as_deref()).map(str::to_owned);
     drop(inner);
     if let Some(id) = to {
-        return activate(app, &id).await;
+        return activate(app, &id, false).await;
     }
     let Some(current) = current else { return Ok(()) };
     match shortcut {
         // A crashed page can't reload; activating it again recreates it.
-        Shortcut::Reload if crashed => activate(app, &current).await,
+        Shortcut::Reload if crashed => activate(app, &current, true).await,
         Shortcut::Reload => reload_service(state, current).await,
         Shortcut::Back => with_page(state, &current, |webview, _| Ok(webview.eval("history.back()")?)).await,
         Shortcut::Forward => with_page(state, &current, |webview, _| Ok(webview.eval("history.forward()")?)).await,

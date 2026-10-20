@@ -2,6 +2,7 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { BarPosition, Service, Settings } from "../services/types";
+import { isHibernated } from "./Hibernated";
 
 export interface ServiceMenuActions {
   home: () => void;
@@ -9,6 +10,7 @@ export interface ServiceMenuActions {
   setEnabled: (enabled: boolean) => void;
   setAudio: (audio: boolean) => void;
   setNotifications: (notifications: boolean) => void;
+  setHibernated: (hibernated: boolean) => void;
   edit: () => void;
 }
 
@@ -39,6 +41,13 @@ export async function showServiceMenu(
       text: "Enable notifications",
       checked: s.notifications,
       action: () => actions.setNotifications(!s.notifications),
+    }),
+    // Whether it's hibernated now; whether it hibernates when idle is in "Edit app".
+    CheckMenuItem.new({
+      text: "Hibernated",
+      checked: s.enabled && isHibernated(s),
+      enabled: s.enabled,
+      action: () => actions.setHibernated(!isHibernated(s)),
     }),
     PredefinedMenuItem.new({ item: "Separator" }),
     MenuItem.new({ text: "Edit app", action: () => actions.edit() }),

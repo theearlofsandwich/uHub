@@ -8,10 +8,19 @@
 //! service keeps its (dead) handle, and stays `active` if it was on screen,
 //! until it is activated (recreated) or unloaded.
 //!
+//! A service hibernated while on screen (`hibernate_active`), or switched to
+//! while hibernated (`show_hibernated`), is remembered as `hibernated`: the
+//! shell shows a placeholder in its place until a service is activated. It is
+//! never set while one is `active`.
+//!
 //! Unread counts and whether audio is playing are reported by a live webview,
 //! so they are kept here too and dropped with its handle. So is the time a
 //! suspended service was last on screen, which decides when it is hibernated
 //! (see `select_hibernation`).
+//!
+//! `Wakes` decides when a hibernated service with auto-wake is loaded in the
+//! background again, and remembers which loaded ones were, as they may
+//! hibernate on a rule of their own.
 //!
 //! Each transition calls into a `Backend` (real webviews in webviews.rs, a fake
 //! in the tests) and only updates the registry for the steps that succeeded.
@@ -45,6 +54,8 @@ pub struct Registry<H> {
     /// When each service was last hidden by a switch. Always a subset of
     /// `handles`' keys; every SUSPENDED service has one.
     hidden_at: HashMap<String, Instant>,
+    /// The service hibernated while on screen; `None` while one is `active`.
+    hibernated: Option<String>,
 }
 
 impl<H> Default for Registry<H> {
@@ -56,6 +67,7 @@ impl<H> Default for Registry<H> {
             unread: HashMap::new(),
             playing: HashSet::new(),
             hidden_at: HashMap::new(),
+            hibernated: None,
         }
     }
 }
@@ -98,6 +110,58 @@ pub fn select_hibernation(
     out
 }
 
+/// Auto-wake bookkeeping, brought up to date by each `Wakes::due` call.
+#[derive(Default)]
+pub struct Wakes {
+    /// Since when each unloaded service has been seen unloaded.
+    asleep: HashMap<String, Instant>,
+    /// Loaded services that were woken, until switched to or unloaded.
+    woken: HashSet<String>,
+}
+
+impl Wakes {
+    /// Given every service as (id, its wake period, whether it is loaded), the
+    /// ones to wake at `now`: unloaded for at least their period. They count
+    /// as woken from here on; one that then fails to load is just asleep
+    /// again from the next call. `None` never wakes.
+    pub fn due<'a>(
+        &mut self,
+        now: Instant,
+        services: impl IntoIterator<Item = (&'a str, Option<Duration>, bool)>,
+    ) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for (id, period, loaded) in services {
+            seen.insert(id);
+            if loaded {
+                self.asleep.remove(id);
+                continue;
+            }
+            self.woken.remove(id);
+            let since = *self.asleep.entry(id.to_owned()).or_insert(now);
+            if period.is_some_and(|p| now.saturating_duration_since(since) >= p) {
+                self.asleep.remove(id);
+                self.woken.insert(id.to_owned());
+                out.push(id.to_owned());
+            }
+        }
+        // Services gone from the config.
+        self.asleep.retain(|id, _| seen.contains(id.as_str()));
+        self.woken.retain(|id| seen.contains(id.as_str()));
+        out
+    }
+
+    /// Whether `id` is loaded only because it was woken.
+    pub fn is_woken(&self, id: &str) -> bool {
+        self.woken.contains(id)
+    }
+
+    /// `id` was switched to: from now on it hibernates like any other.
+    pub fn forget(&mut self, id: &str) {
+        self.woken.remove(id);
+    }
+}
+
 impl<H> Registry<H> {
     pub fn state(&self, id: &str) -> Lifecycle {
         if self.crashed.contains(id) {
@@ -130,6 +194,11 @@ impl<H> Registry<H> {
         self.active.as_ref().and_then(|id| self.handles.get(id))
     }
 
+    /// The service hibernated while on screen, whose placeholder the shell shows.
+    pub fn hibernated_on_screen(&self) -> Option<&str> {
+        self.hibernated.as_deref()
+    }
+
     /// `services` (the configuration) in display order, with their states.
     pub fn snapshot(&self, services: &[Service]) -> Vec<ServiceInfo> {
         services
@@ -145,9 +214,12 @@ impl<H> Registry<H> {
                 enabled: s.instance.enabled,
                 icon: s.icon(),
                 state: self.state(s.id()),
+                shown: self.active.as_deref() == Some(s.id()) || self.hibernated.as_deref() == Some(s.id()),
                 unread: self.unread.get(s.id()).copied().unwrap_or(0),
                 keep_alive: s.keep_alive(),
-                hibernate_after_minutes: s.instance.hibernate_after_minutes,
+                hibernate_after_seconds: s.instance.hibernate_after_seconds,
+                auto_wake_seconds: s.instance.auto_wake_seconds,
+                hibernate_after_wake_seconds: s.instance.hibernate_after_wake_seconds,
                 notifications: s.instance.permissions.notifications,
                 audio: s.instance.audio,
                 media_indicator: s.instance.media_indicator,
@@ -239,6 +311,7 @@ impl<H> Registry<H> {
         match result {
             Ok(()) => {
                 self.active = Some(id.to_owned());
+                self.hibernated = None;
                 Ok(())
             }
             Err(e) => {
@@ -291,12 +364,46 @@ impl<H> Registry<H> {
         Ok(())
     }
 
-    /// Destroy `id`'s webview. A no-op if it is already unloaded; if closing
-    /// fails the handle is kept so the unload can be retried.
+    /// Unload the service on screen, leaving it `hibernated` there (see the
+    /// module docs). A no-op if none is.
+    pub fn hibernate_active<B>(&mut self, backend: &B) -> Result<(), B::Error>
+    where
+        B: Backend<Handle = H>,
+    {
+        let Some(id) = self.active.clone() else {
+            return Ok(());
+        };
+        self.unload(backend, &id)?;
+        self.hibernated = Some(id);
+        Ok(())
+    }
+
+    /// Put the placeholder of `id`, which must be unloaded, on screen in
+    /// place of the active service, which is hidden as on any switch.
+    pub fn show_hibernated<B>(&mut self, backend: &B, id: &str) -> Result<(), B::Error>
+    where
+        B: Backend<Handle = H>,
+    {
+        debug_assert!(!self.handles.contains_key(id), "{id} isn't hibernated");
+        if let Some(p) = &self.active {
+            backend.hide(p, &self.handles[p])?;
+            self.hidden_at.insert(p.clone(), Instant::now());
+        }
+        self.active = None;
+        self.hibernated = Some(id.to_owned());
+        Ok(())
+    }
+
+    /// Destroy `id`'s webview, and its placeholder if it was `hibernated` on
+    /// screen. A no-op if it is already unloaded; if closing fails the handle
+    /// is kept so the unload can be retried.
     pub fn unload<B>(&mut self, backend: &B, id: &str) -> Result<(), B::Error>
     where
         B: Backend<Handle = H>,
     {
+        if self.hibernated.as_deref() == Some(id) {
+            self.hibernated = None;
+        }
         let Some(handle) = self.handles.get(id) else {
             return Ok(());
         };
@@ -402,6 +509,7 @@ mod tests {
         if let Some(a) = active.first() {
             assert_eq!(Some(a), reg.active.as_ref());
         }
+        assert!(reg.active.is_none() || reg.hibernated.is_none(), "active and hibernated on screen");
         let visible: Vec<_> = fake.visible.borrow().iter().cloned().collect();
         assert_eq!(visible, reg.active.iter().cloned().collect::<Vec<_>>(), "visible webviews != active service");
         assert!(reg.crashed.iter().all(|id| reg.handles.contains_key(id)), "crashed without a handle");
@@ -464,6 +572,44 @@ mod tests {
         // Switching to it shows the preloaded page.
         reg.activate(&fake, svc(1)).unwrap();
         assert_eq!(fake.creates.get(), 2);
+        assert_consistent(&reg, &fake);
+    }
+
+    #[test]
+    fn hibernating_the_active_service_leaves_its_placeholder() {
+        let (mut reg, fake) = (Registry::default(), Fake::default());
+        reg.hibernate_active(&fake).unwrap();
+        assert_eq!(reg.hibernated_on_screen(), None);
+
+        reg.activate(&fake, svc(0)).unwrap();
+        reg.activate(&fake, svc(1)).unwrap();
+        reg.hibernate_active(&fake).unwrap();
+        assert_eq!(reg.state(svc(1).id()), Lifecycle::Unloaded);
+        assert_eq!(reg.hibernated_on_screen(), Some(svc(1).id()));
+        let shown: Vec<_> = reg.snapshot(&SVCS).into_iter().filter(|s| s.shown).map(|s| s.id).collect();
+        assert_eq!(shown, [svc(1).id()]);
+        assert_consistent(&reg, &fake);
+
+        // Waking it, or switching to another, replaces the placeholder.
+        reg.activate(&fake, svc(1)).unwrap();
+        assert_eq!(reg.hibernated_on_screen(), None);
+        reg.hibernate_active(&fake).unwrap();
+        reg.activate(&fake, svc(0)).unwrap();
+        assert_eq!(reg.hibernated_on_screen(), None);
+        assert_consistent(&reg, &fake);
+
+        // Switching to a hibernated one shows its placeholder, sending the
+        // active one to the background.
+        reg.show_hibernated(&fake, svc(1).id()).unwrap();
+        assert_eq!(reg.state(svc(0).id()), Lifecycle::Suspended);
+        assert_eq!(reg.hibernated_on_screen(), Some(svc(1).id()));
+        assert_consistent(&reg, &fake);
+        reg.activate(&fake, svc(0)).unwrap();
+
+        // So does unloading it (disabled or removed) while it's shown.
+        reg.hibernate_active(&fake).unwrap();
+        reg.unload(&fake, svc(0).id()).unwrap();
+        assert_eq!(reg.hibernated_on_screen(), None);
         assert_consistent(&reg, &fake);
     }
 
@@ -812,6 +958,35 @@ mod tests {
         reg.unload(&fake, svc(3).id()).unwrap();
         assert_eq!(pick(&reg, policy(Some(15), None)), Vec::<String>::new());
         assert_consistent(&reg, &fake);
+    }
+
+    #[test]
+    fn wakes_after_the_period_asleep_and_only_then() {
+        let t0 = Instant::now();
+        let at = |min: u32| t0 + min * MIN;
+        let mut w = Wakes::default();
+        let five = Some(5 * MIN);
+        // a: 5 min auto-wake, b: none, c: loaded.
+        let all = |a_loaded| [("a", five, a_loaded), ("b", None, false), ("c", five, true)];
+        assert!(w.due(at(0), all(false)).is_empty(), "first seen asleep now");
+        assert!(w.due(at(4), all(false)).is_empty());
+        assert_eq!(w.due(at(5), all(false)), ["a"]);
+        assert!(w.is_woken("a") && !w.is_woken("b") && !w.is_woken("c"));
+        // Loaded and woken, then hibernated again at 7: asleep from then.
+        assert!(w.due(at(6), all(true)).is_empty());
+        assert!(w.is_woken("a"));
+        assert!(w.due(at(7), all(false)).is_empty());
+        assert!(!w.is_woken("a"));
+        assert!(w.due(at(11), all(false)).is_empty());
+        assert_eq!(w.due(at(12), all(false)), ["a"]);
+        assert!(w.due(at(600), all(false)).is_empty(), "a asleep again only from 12's wake, b never");
+
+        // Switched to: no longer woken. Removed from the config: forgotten.
+        w.due(at(601), all(true));
+        w.forget("a");
+        assert!(!w.is_woken("a"));
+        assert!(w.due(at(602), [("c", five, true)]).is_empty());
+        assert!(w.asleep.is_empty() && w.woken.is_empty());
     }
 
     /// Long pseudo-random run of activations, unloads, crashes and injected failures.

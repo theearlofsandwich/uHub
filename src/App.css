@@ -85,8 +85,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .playing { flex: none; display: flex; color: var(--muted); font-size: 13px; }
 .service.selected .playing { color: var(--on-accent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #4a4e5a; flex: none; }
-.dot.active { background: #3ddc84; }
-.dot.suspended { background: #f5b942; }
 .service .name { flex: 1; min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge {
   flex: none; min-width: 18px; padding: 1px 6px; border-radius: 9px;
@@ -101,6 +99,22 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .sidebar:not(.labels) .playing { position: absolute; top: 2px; left: 2px; font-size: 11px; }
 .dot.crashed { background: #ff5c5c; box-shadow: 0 0 0 2px rgba(255, 92, 92, .35); }
 
+
+/* In place of a service hibernated on screen (Hibernated.tsx): the rest of
+   the window beside the bar, which is outside the shell once it's the bar
+   again. --bar-size is set by Hibernated.tsx. */
+.hibernated {
+  position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 16px; background: var(--bg); text-align: center;
+  --icon-size: 64px;
+}
+.hibernated.left { left: var(--bar-size); }
+.hibernated.right { right: var(--bar-size); }
+.hibernated.top { top: var(--bar-size); }
+.hibernated.bottom { bottom: var(--bar-size); }
+.hibernated .service-icon { opacity: .6; filter: grayscale(.6); }
+.hibernated h2 { margin: 8px 0 0; font-size: 18px; }
+.hibernated p { max-width: 360px; margin: 0 0 8px; color: var(--muted); }
 
 /* "Add app" modal, over the whole window (the shell covers it while open). */
 .modal-backdrop {
@@ -220,6 +234,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .row-field select:disabled { opacity: .45; }
 .row-field > .range-field { flex-direction: row; align-items: center; gap: 10px; }
 .row-field > .color-field { flex-direction: row; gap: 6px; }
+.row-field > .minutes-field { flex: none; flex-direction: row; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.minutes-field input {
+  width: 80px; font: inherit; font-size: 14px; color: inherit; padding: 7px 9px;
+  border: 1px solid var(--border); border-radius: 6px; background: #101216;
+}
+.minutes-field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.minutes-field input[aria-invalid="true"] { border-color: #b8474d; }
 .range-field input { width: 140px; margin: 0; accent-color: var(--accent); }
 .range-field output { min-width: 3.5em; color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 

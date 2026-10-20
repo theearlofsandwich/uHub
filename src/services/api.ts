@@ -5,8 +5,12 @@ import type { NewService, Recipe, Service, SiteInfo, Settings } from "./types";
 /** Initial snapshot only; later changes arrive via `onServicesChanged`. */
 export const listServices = () => invoke<Service[]>("list_services");
 export const listRecipes = () => invoke<Recipe[]>("list_recipes");
+/** Switch to `id`; a hibernated one shows its "App hibernated" page instead of loading. */
 export const activateService = (id: string) => invoke<void>("activate_service", { id });
-export const unloadService = (id: string) => invoke<void>("unload_service", { id });
+/** Switch to `id`, loading it even if it is hibernated. */
+export const wakeService = (id: string) => invoke<void>("wake_service", { id });
+/** Hibernate `id` now, or wake it (in the background, unless its "App hibernated" page is on screen). */
+export const setHibernated = (id: string, hibernated: boolean) => invoke<void>("set_hibernated", { id, hibernated });
 /** Resolves to the new service's id. */
 export const addService = (service: NewService) => invoke<string>("add_service", { service });
 /** Fetches the page at `url` (from Rust: the shell can't) for a default name and icon. */

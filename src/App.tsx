@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppModal } from "./components/AppModal";
+import { Hibernated, isHibernated } from "./components/Hibernated";
 import { RecipePicker } from "./components/RecipePicker";
 import { SettingsModal } from "./components/SettingsModal";
 import { showNotificationMenu, showServiceMenu } from "./components/serviceMenu";
@@ -18,10 +19,12 @@ import {
   reorderServices,
   setAudio,
   setEnabled,
+  setHibernated,
   setNotifications,
   setOverlay,
   setSettings as saveSettings,
   updateService,
+  wakeService,
 } from "./services/api";
 import type { CommandError, NewService, Recipe, Service, Settings } from "./services/types";
 import "./App.css";
@@ -138,7 +141,7 @@ export default function App() {
   const submitAdd = async (service: NewService) => {
     const id = await addService(service);
     closeModal();
-    if (service.enabled) await run(activateService(id));
+    if (service.enabled) await run(wakeService(id));
   };
   const submitEdit = (id: string) => async (service: NewService) => {
     await updateService(id, service);
@@ -152,20 +155,32 @@ export default function App() {
   // Recipes load at startup; until then an app can't be edited.
   const editedRecipe = typeof modal === "object" && modal !== null && "id" in modal ? recipes.find((r) => r.id === modal.recipe) : undefined;
   const position = settings?.bar_position ?? "left";
-  const openMenu = (s: Service, anchor: DOMRect) =>
-    void showServiceMenu(
-      s,
-      anchor,
-      {
-        home: () => void run(goHome(s.id)),
-        reload: () => void run(reloadService(s.id)),
-        setEnabled: (on) => void run(setEnabled(s.id, on)),
-        setAudio: (on) => void run(setAudio(s.id, on)),
-        setNotifications: (on) => void run(setNotifications(s.id, on)),
-        edit: () => openModal(s),
-      },
-      position,
-    ).catch((e) => setError(toError(e)));
+  const iconSize = settings?.icon_size ?? "medium";
+  const hibernated = services.find((s) => s.shown && isHibernated(s));
+  // The switches show Rust's current state, not the last snapshot: one sent
+  // by a change still in progress (hibernating, say) may not have arrived
+  // yet. list_services waits for that change to finish.
+  const openMenu = (shown: Service, anchor: DOMRect) =>
+    void listServices()
+      .then((list) => {
+        const s = list.find((x) => x.id === shown.id);
+        if (!s) return;
+        return showServiceMenu(
+          s,
+          anchor,
+          {
+            home: () => void run(goHome(s.id)),
+            reload: () => void run(reloadService(s.id)),
+            setEnabled: (on) => void run(setEnabled(s.id, on)),
+            setAudio: (on) => void run(setAudio(s.id, on)),
+            setNotifications: (on) => void run(setNotifications(s.id, on)),
+            setHibernated: (on) => void run(setHibernated(s.id, on)),
+            edit: () => openModal(s),
+          },
+          position,
+        );
+      })
+      .catch((e) => setError(toError(e)));
 
   // The bell's switches save like any setting; a failure shows in the bar.
   const openNotificationMenu = (anchor: DOMRect) => {
@@ -187,7 +202,7 @@ export default function App() {
           services={services}
           position={position}
           labels={settings?.bar_labels ?? false}
-          iconSize={settings?.icon_size ?? "medium"}
+          iconSize={iconSize}
           spacing={settings?.icon_spacing ?? 2}
           error={error}
           onDismissError={() => setError(null)}
@@ -208,6 +223,9 @@ export default function App() {
           onNotificationMenu={openNotificationMenu}
           onSettings={() => openModal("settings")}
         />
+      )}
+      {hibernated && (
+        <Hibernated service={hibernated} position={position} iconSize={iconSize} onWake={() => void run(wakeService(hibernated.id))} />
       )}
       {modal === "new" && <RecipePicker recipes={recipes} onPick={(r) => setModal({ adding: r })} onClose={closeModal} />}
       {typeof modal === "object" && modal !== null && "adding" in modal && (

@@ -17,12 +17,18 @@ export interface Service {
   /** A data: URL. */
   icon: string | null;
   state: Lifecycle;
+  /** On screen: active (or crashed there), or hibernated there with the "App hibernated" page in its place. */
+  shown: boolean;
   /** Unread count from the page title; 0 while unloaded. */
   unread: number;
   /** Never hibernated: stays loaded in the background (e.g. for notifications). */
   keepAlive: boolean;
   /** null: the app-wide `Settings.hibernate_after_minutes`. */
-  hibernateAfterMinutes: number | null;
+  hibernateAfterSeconds: number | null;
+  /** While hibernated, loads in the background this often (seconds); null: never. */
+  autoWakeSeconds: number | null;
+  /** Hibernates this long after an auto-wake; null: as after any other time in the background. */
+  hibernateAfterWakeSeconds: number | null;
   /** The page may show (desktop) notifications. */
   notifications: boolean;
   /** false: the webview is muted. */
@@ -56,7 +62,10 @@ export interface NewService {
   unreadBadge: boolean;
   enabled: boolean;
   hibernation: boolean;
-  hibernateAfterMinutes: number;
+  hibernateAfterSeconds: number;
+  /** null: no auto-wake. */
+  autoWakeSeconds: number | null;
+  hibernateAfterWakeSeconds: number;
   openLinksInside: boolean;
   startHibernated: boolean;
 }

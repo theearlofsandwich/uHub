@@ -39,7 +39,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             webviews::list_services,
             webviews::activate_service,
-            webviews::unload_service,
+            webviews::wake_service,
+            webviews::set_hibernated,
             webviews::list_recipes,
             webviews::add_service,
             webviews::inspect_site,
@@ -80,7 +81,7 @@ pub fn run() {
 
             // The default size; tauri_plugin_window_state restores the last one.
             let window = WindowBuilder::new(app, "main")
-                .title("uHub")
+                .title("")
                 .inner_size(1280., 800.)
                 .min_inner_size(640., 400.)
                 .build()?;
