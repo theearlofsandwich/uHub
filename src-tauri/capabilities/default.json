@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "shell",
+  "description": "IPC for the trusted React shell webview ONLY. Remote service webviews (svc-*) are deliberately not listed, so they can call no commands.",
+  "webviews": ["shell"],
+  "permissions": ["core:default"]
+}

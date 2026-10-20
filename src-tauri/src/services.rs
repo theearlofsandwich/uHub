@@ -1,0 +1,905 @@
+//! Service registry, Ferdium-style: compiled-in *recipes* (what a site is: URL,
+//! allowed domains, injected JS/CSS) and user-configured *instances* (an
+//! account of a recipe: name, storage profile, optional URL override), saved
+//! as JSON in `app_config_dir()/services.json`.
+//!
+//! Rust is the source of truth for URLs, allowed domains and profiles: the
+//! (trusted) React shell only ever sends an instance *id*, so a compromised or
+//! buggy frontend cannot point a service at an arbitrary origin. Everything
+//! read from the config file is validated here (profile names become paths, URL
+//! overrides must stay within the recipe's domains) before it is used.
+
+use crate::{
+    badge::{self, BadgeParser},
+    error::{Error, Result},
+    navigation,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tauri::Url;
+
+/// A site WebDeck knows how to host. Compiled in, keyed by `id`.
+pub struct Recipe {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub url: &'static str,
+    /// Host suffixes the webview may navigate within ("a.com" matches a.com and *.a.com).
+    pub allowed_domains: &'static [&'static str],
+    pub inject_js: &'static str,
+    pub inject_css: &'static str,
+    pub user_agent: Option<&'static str>,
+    pub icon: Option<&'static str>,
+    /// Reads the unread count from the page title; `None`: the site shows none.
+    pub badge: Option<BadgeParser>,
+    /// The site needs camera/microphone (calls, voice messages). Without this,
+    /// user-media requests are denied whatever the instance allows.
+    pub user_media: bool,
+    /// Default for `Instance::keep_alive`: messengers stay loaded in the
+    /// background so their notifications keep arriving.
+    pub keep_alive: bool,
+}
+
+pub const RECIPES: &[Recipe] = &[
+    Recipe {
+        id: "whatsapp",
+        name: "WhatsApp",
+        url: "https://web.whatsapp.com/",
+        allowed_domains: &["whatsapp.com", "whatsapp.net"],
+        inject_js: include_str!("../../services/whatsapp/inject.js"),
+        inject_css: include_str!("../../services/whatsapp/inject.css"),
+        user_agent: None,
+        icon: None,
+        badge: Some(badge::from_title),
+        user_media: true,
+        keep_alive: true,
+    },
+    Recipe {
+        id: "gmail",
+        name: "Gmail",
+        url: "https://mail.google.com/",
+        allowed_domains: &["google.com", "gstatic.com", "googleusercontent.com"],
+        inject_js: include_str!("../../services/gmail/inject.js"),
+        inject_css: include_str!("../../services/gmail/inject.css"),
+        user_agent: None,
+        icon: None,
+        badge: Some(badge::gmail),
+        user_media: false,
+        keep_alive: false,
+    },
+    Recipe {
+        id: "discord",
+        name: "Discord",
+        url: "https://discord.com/app",
+        allowed_domains: &["discord.com", "discordapp.com", "discordapp.net", "hcaptcha.com"],
+        inject_js: include_str!("../../services/discord/inject.js"),
+        inject_css: include_str!("../../services/discord/inject.css"),
+        user_agent: None,
+        icon: None,
+        badge: Some(badge::from_title),
+        user_media: true,
+        keep_alive: true,
+    },
+];
+
+pub fn recipe(id: &str) -> Option<&'static Recipe> {
+    RECIPES.iter().find(|r| r.id == id)
+}
+
+/// One configured service, as stored in services.json.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Instance {
+    /// Generated once, never changes; also the webview label suffix.
+    pub id: String,
+    pub name: String,
+    pub recipe: String,
+    /// Storage profile. Two services sharing a profile share cookies/storage;
+    /// distinct profiles get distinct WebKit data directories.
+    pub profile: String,
+    /// Replaces the recipe's URL; must be https within its allowed domains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub order: u32,
+    #[serde(default)]
+    pub permissions: Permissions,
+    /// Never hibernate this service; `None` means the recipe's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// App-wide settings, the `settings` object of services.json.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Settings {
+    /// Unload a background service (unless kept alive) after this many
+    /// minutes; 0 = never.
+    #[serde(default = "default_hibernate_after")]
+    pub hibernate_after_minutes: u32,
+    /// Keep at most this many background services (not counting kept-alive
+    /// ones) loaded, unloading the oldest; `None` = no limit.
+    #[serde(default)]
+    pub max_suspended: Option<u32>,
+    /// Closing the window hides it to the tray instead of quitting.
+    #[serde(default = "yes")]
+    pub close_to_tray: bool,
+}
+
+fn default_hibernate_after() -> u32 {
+    15
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { hibernate_after_minutes: default_hibernate_after(), max_suspended: None, close_to_tray: true }
+    }
+}
+
+impl Settings {
+    fn validate(&self) -> Result<()> {
+        if self.hibernate_after_minutes > 7 * 24 * 60 {
+            return Err(Error::invalid("hibernate after must be at most a week"));
+        }
+        if self.max_suspended.is_some_and(|n| n > 100) {
+            return Err(Error::invalid("background limit must be at most 100"));
+        }
+        Ok(())
+    }
+}
+
+/// Which web permission requests an instance grants. Geolocation and every
+/// other kind are always denied; they are not configurable.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Permissions {
+    #[serde(default = "yes")]
+    pub notifications: bool,
+    /// Camera/microphone; only takes effect if the recipe declares `user_media`.
+    #[serde(default = "yes")]
+    pub user_media: bool,
+}
+
+impl Default for Permissions {
+    fn default() -> Self {
+        Self { notifications: true, user_media: true }
+    }
+}
+
+/// A WebKit permission request, as far as the policy cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionKind {
+    Notifications,
+    /// Camera and/or microphone.
+    UserMedia,
+    Geolocation,
+    /// Anything else, by WebKit type name (for the log).
+    Other(&'static str),
+}
+
+/// An instance that passed validation, joined with its recipe.
+#[derive(Clone, Debug)]
+pub struct Service {
+    pub instance: Instance,
+    pub recipe: &'static Recipe,
+}
+
+impl std::fmt::Debug for Recipe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id)
+    }
+}
+
+/// Ids and profiles become webview labels and directory names: one path
+/// component of `[a-z0-9_-]`, so no separators, no "." or "..", nothing hidden.
+pub fn validate_token(kind: &str, s: &str) -> Result<()> {
+    let ok = !s.is_empty()
+        && s.len() <= 64
+        && s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!("invalid {kind} {s:?}: use 1-64 of a-z, 0-9, '-', '_'")))
+    }
+}
+
+pub fn validate_profile(profile: &str) -> Result<()> {
+    validate_token("profile", profile)
+}
+
+/// Trimmed display name, non-empty and at most 64 characters.
+pub fn validate_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+        return Err(Error::invalid("name must be 1-64 printable characters"));
+    }
+    Ok(name.to_owned())
+}
+
+/// A URL override may change the path or subdomain, never the site.
+pub fn validate_url_override(recipe: &Recipe, url: &str) -> Result<Url> {
+    let parsed: Url = url.parse().map_err(|e| Error::invalid(format!("invalid url {url:?}: {e}")))?;
+    if parsed.scheme() != "https" {
+        return Err(Error::invalid(format!("url {url:?} must use https")));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::invalid(format!("url {url:?} must not contain credentials")));
+    }
+    match parsed.host_str() {
+        Some(h) if navigation::host_allowed(h, recipe.allowed_domains) => Ok(parsed),
+        _ => Err(Error::invalid(format!(
+            "url {url:?} is outside {}'s domains {:?}",
+            recipe.id, recipe.allowed_domains
+        ))),
+    }
+}
+
+impl Service {
+    pub fn new(instance: Instance) -> Result<Self> {
+        validate_token("id", &instance.id)?;
+        validate_profile(&instance.profile)?;
+        validate_name(&instance.name)?;
+        let recipe = recipe(&instance.recipe).ok_or_else(|| Error::invalid(format!("unknown recipe {:?}", instance.recipe)))?;
+        if let Some(url) = &instance.url {
+            validate_url_override(recipe, url)?;
+        }
+        Ok(Self { instance, recipe })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.instance.id
+    }
+
+    pub fn url(&self) -> &str {
+        self.instance.url.as_deref().unwrap_or(self.recipe.url)
+    }
+
+    pub fn allowed_domains(&self) -> &'static [&'static str] {
+        self.recipe.allowed_domains
+    }
+
+    pub fn keep_alive(&self) -> bool {
+        self.instance.keep_alive.unwrap_or(self.recipe.keep_alive)
+    }
+
+    /// The permission policy: deny unless the instance (and, for camera and
+    /// microphone, the recipe) allows it.
+    pub fn allows(&self, kind: PermissionKind) -> bool {
+        let p = &self.instance.permissions;
+        match kind {
+            PermissionKind::Notifications => p.notifications,
+            PermissionKind::UserMedia => self.recipe.user_media && p.user_media,
+            PermissionKind::Geolocation | PermissionKind::Other(_) => false,
+        }
+    }
+
+    /// Script run via `initialization_script`: at document-start on every
+    /// top-level navigation, before any page script. Guarded to the service's own
+    /// domains because it re-runs on every navigation (e.g. login redirects).
+    pub fn init_script(&self) -> String {
+        let hosts = serde_json::to_string(self.recipe.allowed_domains).unwrap();
+        let css = serde_json::to_string(self.recipe.inject_css).unwrap();
+        format!(
+            r#"(function () {{
+  var hosts = {hosts};
+  var h = location.hostname;
+  var own = function (host) {{
+    return hosts.some(function (d) {{ return host === d || host.endsWith("." + d); }});
+  }};
+  if (!own(h)) return;
+  // Off-site link clicks become target=_blank so they reach on_new_window and
+  // open in the system browser; plain navigations to them are only blocked.
+  // Bubble phase on window, so page handlers run first and can preventDefault.
+  window.addEventListener("click", function (e) {{
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    var a = e.target && e.target.closest && e.target.closest("a[href]");
+    if (!a || a.hasAttribute("download")) return;
+    var u;
+    try {{ u = new URL(a.href, location.href); }} catch (_) {{ return; }}
+    if ((u.protocol === "http:" || u.protocol === "https:") && !own(u.hostname)) {{
+      a.target = "_blank";
+    }}
+  }});
+  {js}
+  var css = {css};
+  if (css.trim()) {{
+    var add = function () {{
+      var s = document.createElement("style");
+      s.setAttribute("data-webdeck", "");
+      s.textContent = css;
+      (document.head || document.documentElement).appendChild(s);
+    }};
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", add);
+    else add();
+  }}
+}})();"#,
+            js = self.recipe.inject_js
+        )
+    }
+}
+
+/// On-disk format of services.json.
+#[derive(Serialize, Deserialize)]
+struct File {
+    version: u32,
+    services: Vec<Instance>,
+    #[serde(default)]
+    settings: Settings,
+    /// The service that was on screen last, activated again on launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_active: Option<String>,
+}
+
+const FILE_VERSION: u32 = 1;
+
+/// What services.json holds, validated.
+#[derive(Clone)]
+struct Saved {
+    services: Vec<Service>,
+    settings: Settings,
+    last_active: Option<String>,
+}
+
+/// The pre-config hard-coded services, with their original ids and profiles so
+/// existing profile directories (and logins) are reused.
+pub fn seed() -> Vec<Service> {
+    [
+        ("whatsapp", "WhatsApp", "whatsapp"),
+        ("gmail-personal", "Gmail (Personal)", "gmail"),
+        ("gmail-work", "Gmail (Work)", "gmail"),
+        ("discord", "Discord", "discord"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (id, name, recipe))| {
+        Service::new(Instance {
+            id: id.into(),
+            name: name.into(),
+            recipe: recipe.into(),
+            profile: id.into(),
+            url: None,
+            enabled: true,
+            order: i as u32,
+            permissions: Permissions::default(),
+            keep_alive: None,
+        })
+        .expect("seed services are valid")
+    })
+    .collect()
+}
+
+/// Parse services.json. Invalid or duplicate entries are skipped (and logged)
+/// rather than failing the whole file; the result is sorted by `order`.
+/// Invalid settings fall back to the defaults, and a `last_active` naming no
+/// service is dropped.
+fn parse(json: &str) -> Result<Saved> {
+    let file: File = serde_json::from_str(json).map_err(|e| Error::invalid(e.to_string()))?;
+    if file.version != FILE_VERSION {
+        return Err(Error::invalid(format!("unsupported version {}", file.version)));
+    }
+    let mut out: Vec<Service> = Vec::new();
+    for inst in file.services {
+        if out.iter().any(|s| s.instance.id == inst.id) {
+            log::warn!("services.json: skipping duplicate id {:?}", inst.id);
+            continue;
+        }
+        match Service::new(inst) {
+            Ok(s) => out.push(s),
+            Err(e) => log::warn!("services.json: skipping entry: {e}"),
+        }
+    }
+    out.sort_by_key(|s| s.instance.order);
+    renumber(&mut out);
+    let settings = match file.settings.validate() {
+        Ok(()) => file.settings,
+        Err(e) => {
+            log::warn!("services.json: using default settings: {e}");
+            Settings::default()
+        }
+    };
+    let last_active = file.last_active.filter(|id| out.iter().any(|s| s.id() == id));
+    Ok(Saved { services: out, settings, last_active })
+}
+
+fn renumber(services: &mut [Service]) {
+    for (i, s) in services.iter_mut().enumerate() {
+        s.instance.order = i as u32;
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The configured services, settings, and where they are saved. Mutations go
+/// through methods that write the file first and only then update memory, so
+/// memory never holds a state that isn't on disk.
+pub struct Config {
+    path: PathBuf,
+    saved: Saved,
+}
+
+impl Config {
+    /// Load `path`, seeding it with [`seed`] if it doesn't exist. An unreadable
+    /// file is moved aside (not overwritten) and the seed used instead.
+    pub fn load(path: PathBuf) -> Result<Self> {
+        let saved = match fs::read_to_string(&path) {
+            Ok(json) => match parse(&json) {
+                Ok(s) => s,
+                Err(e) => {
+                    let aside = path.with_extension(format!("json.corrupt-{}", unix_millis()));
+                    log::error!("{}: {e}; moving it to {} and starting over", path.display(), aside.display());
+                    fs::rename(&path, &aside).map_err(|e| Error::io(format!("moving aside {}", path.display()), e))?;
+                    return Self::seeded(path);
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Self::seeded(path),
+            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+        };
+        Ok(Self { path, saved })
+    }
+
+    fn seeded(path: PathBuf) -> Result<Self> {
+        log::info!("seeding {}", path.display());
+        let saved = Saved { services: seed(), settings: Settings::default(), last_active: None };
+        write_atomic(&path, &saved)?;
+        Ok(Self { path, saved })
+    }
+
+    pub fn services(&self) -> &[Service] {
+        &self.saved.services
+    }
+
+    pub fn find(&self, id: &str) -> Option<&Service> {
+        self.saved.services.iter().find(|s| s.id() == id)
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.saved.settings
+    }
+
+    pub fn last_active(&self) -> Option<&str> {
+        self.saved.last_active.as_deref()
+    }
+
+    fn commit(&mut self, mut next: Saved) -> Result<()> {
+        renumber(&mut next.services);
+        write_atomic(&self.path, &next)?;
+        self.saved = next;
+        Ok(())
+    }
+
+    /// A copy of the saved state with `id`'s service changed by `f`.
+    fn with_service(&self, id: &str, f: impl FnOnce(&mut Instance)) -> Result<Saved> {
+        let mut next = self.saved.clone();
+        f(&mut next.services.iter_mut().find(|s| s.id() == id).ok_or_else(|| unknown(id))?.instance);
+        Ok(next)
+    }
+
+    /// Add an instance of `recipe_id` with a fresh id and its own profile.
+    /// `profile_taken` reports leftover profile directories, which are never
+    /// reused: a new account must not inherit an old login. Returns the new id.
+    pub fn add(&mut self, recipe_id: &str, name: &str, profile_taken: impl Fn(&str) -> bool) -> Result<String> {
+        let recipe = recipe(recipe_id).ok_or_else(|| Error::invalid(format!("unknown recipe {recipe_id:?}")))?;
+        let id = fresh_id(recipe.id, unix_millis(), |c| {
+            self.services().iter().any(|s| s.instance.id == c || s.instance.profile == c) || profile_taken(c)
+        });
+        let svc = Service::new(Instance {
+            id: id.clone(),
+            name: validate_name(name)?,
+            recipe: recipe.id.into(),
+            profile: id.clone(),
+            url: None,
+            enabled: true,
+            order: self.services().len() as u32,
+            permissions: Permissions::default(),
+            keep_alive: None,
+        })?;
+        let mut next = self.saved.clone();
+        next.services.push(svc);
+        self.commit(next)?;
+        Ok(id)
+    }
+
+    /// Remove `id`, returning it. Its webview must already be gone.
+    pub fn remove(&mut self, id: &str) -> Result<Service> {
+        let i = self.services().iter().position(|s| s.id() == id).ok_or_else(|| unknown(id))?;
+        let mut next = self.saved.clone();
+        let removed = next.services.remove(i);
+        if next.last_active.as_deref() == Some(id) {
+            next.last_active = None;
+        }
+        self.commit(next)?;
+        Ok(removed)
+    }
+
+    pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
+        let name = validate_name(name)?;
+        let next = self.with_service(id, |inst| inst.name = name)?;
+        self.commit(next)
+    }
+
+    pub fn set_keep_alive(&mut self, id: &str, keep_alive: bool) -> Result<()> {
+        let next = self.with_service(id, |inst| inst.keep_alive = Some(keep_alive))?;
+        self.commit(next)
+    }
+
+    pub fn set_settings(&mut self, settings: Settings) -> Result<()> {
+        settings.validate()?;
+        let mut next = self.saved.clone();
+        next.settings = settings;
+        self.commit(next)
+    }
+
+    /// Remember `id` as the service to restore on launch. Only writes the file
+    /// when it changes.
+    pub fn set_last_active(&mut self, id: &str) -> Result<()> {
+        if self.last_active() == Some(id) {
+            return Ok(());
+        }
+        let mut next = self.with_service(id, |_| ())?;
+        next.last_active = Some(id.to_owned());
+        self.commit(next)
+    }
+
+    /// `ids` must name every service exactly once.
+    pub fn reorder(&mut self, ids: &[String]) -> Result<()> {
+        let mut services = Vec::with_capacity(ids.len());
+        for id in ids {
+            if services.iter().any(|s: &Service| s.id() == id) {
+                return Err(Error::invalid(format!("{id:?} listed twice")));
+            }
+            services.push(self.find(id).ok_or_else(|| unknown(id))?.clone());
+        }
+        if services.len() != self.services().len() {
+            return Err(Error::invalid("reorder must list every service"));
+        }
+        let next = Saved { services, ..self.saved.clone() };
+        self.commit(next)
+    }
+}
+
+pub fn unknown(id: &str) -> Error {
+    Error::UnknownService(id.to_owned())
+}
+
+/// `<recipe>-<base36 millis>`, bumped until `taken` says no.
+fn fresh_id(recipe: &str, mut n: u64, taken: impl Fn(&str) -> bool) -> String {
+    loop {
+        let id = format!("{recipe}-{}", base36(n));
+        if !taken(&id) {
+            return id;
+        }
+        n += 1;
+    }
+}
+
+fn base36(mut n: u64) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
+/// Write to a sibling temp file, fsync, then rename over `path`, so a crash
+/// leaves either the old or the new file, never a torn one.
+fn write_atomic(path: &Path, saved: &Saved) -> Result<()> {
+    let file = File {
+        version: FILE_VERSION,
+        services: saved.services.iter().map(|s| s.instance.clone()).collect(),
+        settings: saved.settings.clone(),
+        last_active: saved.last_active.clone(),
+    };
+    let err = |e: io::Error| Error::io(format!("saving {}", path.display()), e);
+    let json = serde_json::to_string_pretty(&file).map_err(|e| err(e.into()))?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(err)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let result = (|| {
+        use io::Write;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(err)
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    /// Webview exists and is visible.
+    Active,
+    /// Webview exists but hidden (hide()/show()); page state is kept.
+    Suspended,
+    /// Webview destroyed; only the on-disk profile remains.
+    Unloaded,
+    /// Webview exists but its web process died; activating recreates it.
+    Crashed,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceInfo {
+    pub id: String,
+    pub name: String,
+    pub recipe: &'static str,
+    pub url: String,
+    pub allowed_domains: &'static [&'static str],
+    pub profile: String,
+    pub enabled: bool,
+    pub icon: Option<&'static str>,
+    pub state: Lifecycle,
+    /// From the page title (see badge.rs); 0 while unloaded.
+    pub unread: u32,
+    /// Never hibernated (the instance's setting or the recipe's default).
+    pub keep_alive: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeInfo {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub url: &'static str,
+    pub allowed_domains: &'static [&'static str],
+    pub icon: Option<&'static str>,
+}
+
+pub fn recipe_infos() -> Vec<RecipeInfo> {
+    RECIPES
+        .iter()
+        .map(|r| RecipeInfo { id: r.id, name: r.name, url: r.url, allowed_domains: r.allowed_domains, icon: r.icon })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh, empty directory under the system temp dir.
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("webdeck-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ids(c: &Config) -> Vec<&str> {
+        c.services().iter().map(Service::id).collect()
+    }
+
+    #[test]
+    fn first_run_seeds_legacy_ids_and_profiles() {
+        let path = temp_dir("seed").join("sub/services.json");
+        let c = Config::load(path.clone()).unwrap();
+        assert_eq!(ids(&c), ["whatsapp", "gmail-personal", "gmail-work", "discord"]);
+        for s in c.services() {
+            assert_eq!(s.instance.profile, s.instance.id, "existing profile dirs must be reused");
+        }
+        assert_eq!(c.find("gmail-work").unwrap().url(), "https://mail.google.com/");
+        assert!(path.exists(), "seed is written so ids stay stable");
+        assert!(!path.with_extension("json.tmp").exists());
+
+        // Second load reads the file instead of re-seeding.
+        let mut c = Config::load(path.clone()).unwrap();
+        c.rename("discord", "  Chat ").unwrap();
+        let c = Config::load(path).unwrap();
+        assert_eq!(c.find("discord").unwrap().instance.name, "Chat");
+    }
+
+    #[test]
+    fn corrupt_file_is_moved_aside_not_overwritten() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("services.json");
+        fs::write(&path, "{ not json").unwrap();
+        let c = Config::load(path.clone()).unwrap();
+        assert_eq!(c.services().len(), 4);
+        let aside: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("services.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(fs::read_to_string(dir.join(&aside[0])).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn parse_skips_invalid_entries_and_sorts() {
+        let json = r#"{"version":1,"services":[
+            {"id":"b","name":"B","recipe":"gmail","profile":"b","order":5},
+            {"id":"a","name":"A","recipe":"discord","profile":"a","order":1,"enabled":false},
+            {"id":"a","name":"Dup","recipe":"discord","profile":"x","order":0},
+            {"id":"c","name":"C","recipe":"nope","profile":"c"},
+            {"id":"d","name":"D","recipe":"gmail","profile":"../../etc"},
+            {"id":"e","name":"E","recipe":"gmail","profile":"e","url":"https://evil.example/"},
+            {"id":"f","name":"F","recipe":"gmail","profile":"f","url":"https://inbox.google.com/u/1/"}
+        ]}"#;
+        let s = parse(json).unwrap().services;
+        let got: Vec<_> = s.iter().map(|s| (s.id(), s.instance.order)).collect();
+        assert_eq!(got, [("f", 0), ("a", 1), ("b", 2)]);
+        assert!(!s[1].instance.enabled);
+        assert!(s[2].instance.enabled, "enabled defaults to true");
+        assert_eq!(s[0].url(), "https://inbox.google.com/u/1/");
+        assert!(parse(r#"{"version":2,"services":[]}"#).is_err());
+    }
+
+    #[test]
+    fn profile_validation() {
+        for ok in ["whatsapp", "gmail-work", "a_b-9", "x"] {
+            assert!(validate_profile(ok).is_ok(), "{ok}");
+        }
+        let long = "a".repeat(65);
+        for bad in ["", ".", "..", "../x", "a/b", "a\\b", "/abs", "A", "a b", "é", ".hidden", "a\0", &long] {
+            assert!(validate_profile(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn url_override_validation() {
+        let gmail = recipe("gmail").unwrap();
+        for ok in ["https://mail.google.com/mail/u/1/", "https://google.com", "https://MAIL.Google.com./"] {
+            assert!(validate_url_override(gmail, ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://mail.google.com/",
+            "https://evil.com/",
+            "https://google.com.evil.com/",
+            "https://evilgoogle.com/",
+            "https://user:pw@mail.google.com/",
+            "https://web.whatsapp.com/",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "mail.google.com",
+            "https://1.2.3.4/",
+        ] {
+            assert!(validate_url_override(gmail, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn name_validation() {
+        assert_eq!(validate_name("  Work  ").unwrap(), "Work");
+        assert!(validate_name("   ").is_err());
+        assert!(validate_name(&"x".repeat(65)).is_err());
+        assert!(validate_name("a\nb").is_err());
+    }
+
+    #[test]
+    fn add_remove_rename_reorder() {
+        let path = temp_dir("mutate").join("services.json");
+        let mut c = Config::load(path.clone()).unwrap();
+        let id = c.add("gmail", "Gmail (Side)", |_| false).unwrap();
+        assert!(id.starts_with("gmail-"));
+        let new = c.find(&id).unwrap();
+        assert_eq!(new.instance.profile, id);
+        assert_eq!(new.instance.order, 4);
+        assert!(c.add("nope", "X", |_| false).is_err());
+        assert!(c.add("gmail", " ", |_| false).is_err());
+
+        let mut order: Vec<String> = ids(&c).into_iter().rev().map(String::from).collect();
+        c.reorder(&order).unwrap();
+        assert_eq!(ids(&c)[0], id);
+        assert!(c.reorder(&order[1..]).is_err());
+        order[1] = order[0].clone();
+        assert!(c.reorder(&order).is_err());
+
+        let removed = c.remove("gmail-work").unwrap();
+        assert_eq!(removed.instance.profile, "gmail-work");
+        assert!(c.remove("gmail-work").is_err());
+        assert!(c.rename("nope", "x").is_err());
+
+        let reloaded = Config::load(path).unwrap();
+        assert_eq!(ids(&reloaded), ids(&c));
+        let orders: Vec<_> = reloaded.services().iter().map(|s| s.instance.order).collect();
+        assert_eq!(orders, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn permission_policy() {
+        use PermissionKind::*;
+        let json = r#"{"version":1,"services":[
+            {"id":"wa","name":"WA","recipe":"whatsapp","profile":"wa"},
+            {"id":"g","name":"G","recipe":"gmail","profile":"g","permissions":{"user_media":true}},
+            {"id":"d","name":"D","recipe":"discord","profile":"d","permissions":{"notifications":false,"user_media":false}}
+        ]}"#;
+        let s = parse(json).unwrap().services;
+        let (wa, g, d) = (&s[0], &s[1], &s[2]);
+        assert_eq!(wa.instance.permissions, Permissions::default(), "missing => defaults");
+        assert!(wa.allows(Notifications) && wa.allows(UserMedia));
+        assert!(g.allows(Notifications));
+        assert!(!g.allows(UserMedia), "recipe doesn't declare user media");
+        assert!(!d.allows(Notifications) && !d.allows(UserMedia), "instance opted out");
+        for svc in [wa, g, d] {
+            assert!(!svc.allows(Geolocation));
+            assert!(!svc.allows(Other("WebKitPointerLockPermissionRequest")));
+        }
+    }
+
+    #[test]
+    fn keep_alive_defaults_by_recipe_and_can_be_overridden() {
+        let path = temp_dir("keepalive").join("services.json");
+        let mut c = Config::load(path.clone()).unwrap();
+        let keep = |c: &Config, id| c.find(id).unwrap().keep_alive();
+        assert!(keep(&c, "whatsapp") && keep(&c, "discord"));
+        assert!(!keep(&c, "gmail-work"));
+
+        c.set_keep_alive("whatsapp", false).unwrap();
+        c.set_keep_alive("gmail-work", true).unwrap();
+        assert!(c.set_keep_alive("nope", true).is_err());
+        let c = Config::load(path).unwrap();
+        assert!(!keep(&c, "whatsapp") && keep(&c, "gmail-work"));
+        assert!(keep(&c, "discord"), "untouched: still the recipe default");
+    }
+
+    #[test]
+    fn settings_and_last_active_persist() {
+        let path = temp_dir("settings").join("services.json");
+        let mut c = Config::load(path.clone()).unwrap();
+        assert_eq!(*c.settings(), Settings::default());
+        assert_eq!(c.settings().hibernate_after_minutes, 15);
+        assert_eq!(c.last_active(), None);
+
+        let s = Settings { hibernate_after_minutes: 30, max_suspended: Some(2), close_to_tray: false };
+        c.set_settings(s.clone()).unwrap();
+        assert!(c.set_settings(Settings { max_suspended: Some(1000), ..s.clone() }).is_err());
+        assert!(c.set_settings(Settings { hibernate_after_minutes: u32::MAX, ..s.clone() }).is_err());
+        c.set_last_active("gmail-work").unwrap();
+        assert!(c.set_last_active("nope").is_err());
+
+        let mut c = Config::load(path.clone()).unwrap();
+        assert_eq!(*c.settings(), s);
+        assert_eq!(c.last_active(), Some("gmail-work"));
+
+        // Removing the remembered service forgets it.
+        c.remove("gmail-work").unwrap();
+        assert_eq!(c.last_active(), None);
+        assert_eq!(Config::load(path).unwrap().last_active(), None);
+    }
+
+    #[test]
+    fn parse_tolerates_missing_or_bad_settings() {
+        let old = r#"{"version":1,"services":[{"id":"a","name":"A","recipe":"gmail","profile":"a"}]}"#;
+        let saved = parse(old).unwrap();
+        assert_eq!(saved.settings, Settings::default(), "files from before settings existed");
+        assert_eq!(saved.last_active, None);
+
+        let json = r#"{"version":1,"services":[{"id":"a","name":"A","recipe":"gmail","profile":"a"}],
+            "settings":{"hibernate_after_minutes":0,"max_suspended":100000},"last_active":"gone"}"#;
+        let saved = parse(json).unwrap();
+        assert_eq!(saved.settings, Settings::default(), "out of range: defaults");
+        assert_eq!(saved.last_active, None, "names no service");
+
+        let json = r#"{"version":1,"services":[{"id":"a","name":"A","recipe":"gmail","profile":"a"}],
+            "settings":{"hibernate_after_minutes":0},"last_active":"a"}"#;
+        let saved = parse(json).unwrap();
+        assert_eq!(saved.settings.hibernate_after_minutes, 0);
+        assert!(saved.settings.close_to_tray, "missing field: its default");
+        assert_eq!(saved.last_active.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn fresh_ids_skip_taken_and_are_valid() {
+        let id = fresh_id("gmail", 35, |c| c == "gmail-z");
+        assert_eq!(id, "gmail-10");
+        assert!(validate_token("id", &fresh_id("whatsapp", u64::MAX, |_| false)).is_ok());
+        assert_eq!(base36(0), "0");
+    }
+}

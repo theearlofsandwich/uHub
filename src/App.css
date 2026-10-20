@@ -1,0 +1,57 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 14px;
+  --bg: #16181d;
+  --hover: #23262e;
+  --accent: #5b8cff;
+  --muted: #8a90a0;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; background: var(--bg); color: #e6e8ee; overflow: hidden; }
+
+/* The shell webview *is* the sidebar: its width is SIDEBAR_WIDTH in
+   src-tauri/src/platform/mod.rs, so fill the viewport instead of repeating it. */
+.sidebar { display: flex; flex-direction: column; height: 100%; padding: 8px; }
+h1 { font-size: 15px; margin: 4px 8px 12px; letter-spacing: .04em; }
+.services { list-style: none; margin: 0; padding: 0; flex: 1; }
+.bottom { border-top: 1px solid #2a2d36; padding-top: 8px; }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+.service {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 9px 10px; margin-bottom: 2px; border: 0; border-radius: 6px;
+  background: transparent; text-align: left;
+}
+.service:hover { background: var(--hover); }
+.service.selected { background: var(--accent); color: #fff; font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #4a4e5a; flex: none; }
+.dot.active { background: #3ddc84; }
+.dot.suspended { background: #f5b942; }
+.service .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge {
+  flex: none; min-width: 18px; padding: 1px 6px; border-radius: 9px;
+  background: #e5484d; color: #fff; font-size: 11px; font-weight: 600; text-align: center; line-height: 16px;
+}
+.service.selected .badge { background: #fff; color: var(--accent); }
+.dot.crashed { background: #ff5c5c; box-shadow: 0 0 0 2px rgba(255, 92, 92, .35); }
+
+.settings { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.settings button { padding: 6px; border: 1px solid #333744; border-radius: 6px; background: var(--hover); }
+.settings button:disabled { opacity: .4; cursor: default; }
+.settings small { color: var(--muted); line-height: 1.3; }
+.error { position: fixed; left: 8px; right: 8px; bottom: 56px; padding: 8px; border-radius: 6px; background: #5c2328; font-size: 12px; }
+.error-kind { margin-right: 6px; opacity: 0.7; }
+.field { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; border-bottom: 1px solid #2a2d36; }
+.field > label { color: var(--muted); font-size: 12px; }
+.field select, .field input:not([type]) {
+  font: inherit; color: inherit; padding: 5px 6px; border: 1px solid #333744; border-radius: 6px; background: var(--bg);
+}
+.field .check { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; line-height: 1.3; }
+.field .inline { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 12px; }
+.field .inline input {
+  width: 4.5em; font: inherit; color: inherit; padding: 3px 4px; border: 1px solid #333744; border-radius: 6px; background: var(--bg);
+}
+.field .row { display: flex; gap: 6px; }
+.field .row button { flex: 1; }
+.settings button.danger { background: #5c2328; border-color: #7a2e35; }
