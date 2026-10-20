@@ -37,6 +37,12 @@ h1 { flex: none; margin: 0 8px; font-size: 15px; letter-spacing: .04em; white-sp
 }
 .services::-webkit-scrollbar { display: none; }
 .horizontal .services { flex-direction: row; }
+/* Drag to reorder (Sidebar.tsx): the dragged item is lifted, and the pointer
+   stays a grab hand over the whole bar meanwhile. */
+.sidebar { user-select: none; }
+.services.dragging, .services.dragging * { cursor: grabbing !important; }
+.services .dragged .service { background: var(--hover); box-shadow: 0 4px 12px rgba(0, 0, 0, .45); opacity: .85; }
+.services .dragged .service.selected { background: var(--accent); }
 .sidebar .bottom { display: flex; flex-direction: column; gap: var(--icon-gap); }
 .vertical .bottom { border-top: 1px solid #2a2d36; padding-top: 4px; }
 .horizontal .bottom { flex-direction: row; border-left: 1px solid #2a2d36; padding-left: 4px; }

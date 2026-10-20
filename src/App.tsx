@@ -12,6 +12,7 @@ import {
   onServicesChanged,
   reloadService,
   removeService,
+  reorderServices,
   setAudio,
   setEnabled,
   setNotifications,
@@ -142,6 +143,15 @@ export default function App() {
           onDismissError={() => setError(null)}
           onSelect={(id) => void run(activateService(id))}
           onMenu={openMenu}
+          onReorder={(ids) =>
+            reorderServices(ids).then(
+              () => setError(null),
+              (e) => {
+                setError(toError(e));
+                throw e;
+              },
+            )
+          }
           onAdd={() => openModal("new")}
           onSettings={() => openModal("settings")}
         />
