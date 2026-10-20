@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppModal } from "./components/AppModal";
+import { RecipePicker } from "./components/RecipePicker";
 import { SettingsModal } from "./components/SettingsModal";
 import { showServiceMenu } from "./components/serviceMenu";
 import { Sidebar } from "./components/Sidebar";
@@ -8,6 +9,7 @@ import {
   addService,
   getSettings,
   goHome,
+  listRecipes,
   listServices,
   onServicesChanged,
   onShortcut,
@@ -21,7 +23,7 @@ import {
   setSettings as saveSettings,
   updateService,
 } from "./services/api";
-import type { CommandError, NewService, Service, Settings } from "./services/types";
+import type { CommandError, NewService, Recipe, Service, Settings } from "./services/types";
 import "./App.css";
 
 /** Command rejections are `CommandError`s; anything else (e.g. a failed `listen`) has no kind. */
@@ -40,14 +42,17 @@ function onColor(color: string): string {
   return luma > 0.6 ? "#16181d" : "#ffffff";
 }
 
+type Modal = Service | "new" | { adding: Recipe } | "settings";
+
 export default function App() {
   const [services, setServices] = useState<Service[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   /** What Rust last saved; `settings` may be ahead of it while a slider is dragged. */
   const savedSettings = useRef<Settings | null>(null);
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [error, setError] = useState<{ kind?: string; message: string } | null>(null);
-  /** The open modal: "new" adds an app, a service edits it. */
-  const [modal, setModal] = useState<Service | "new" | "settings" | null>(null);
+  /** The open modal: "new" picks an app to add, `adding` adds it, a service edits it. */
+  const [modal, setModal] = useState<Modal | null>(null);
 
   // State comes from "services-changed" events; invoke results only carry errors.
   const run = useCallback(async (op: Promise<void>) => {
@@ -74,6 +79,12 @@ export default function App() {
       })
       .catch((e) => setError(toError(e)));
     return () => void unlisten.then((f) => f());
+  }, []);
+
+  useEffect(() => {
+    listRecipes()
+      .then(setRecipes)
+      .catch((e) => setError(toError(e)));
   }, []);
 
   useEffect(() => {
@@ -112,7 +123,7 @@ export default function App() {
   // shell shrinks back only after it is gone, so it never shows squeezed
   // into the bar.
   const openModal = useCallback(
-    (m: Service | "new" | "settings") => void run(setOverlay(true).then(() => setModal(m))),
+    (m: Modal) => void run(setOverlay(true).then(() => setModal(m))),
     [run],
   );
   // Rust pauses shortcuts while a modal is open, so this never replaces one.
@@ -138,6 +149,8 @@ export default function App() {
     closeModal();
   };
 
+  // Recipes load at startup; until then an app can't be edited.
+  const editedRecipe = typeof modal === "object" && modal !== null && "id" in modal ? recipes.find((r) => r.id === modal.recipe) : undefined;
   const position = settings?.bar_position ?? "left";
   const openMenu = (s: Service, anchor: DOMRect) =>
     void showServiceMenu(
@@ -181,11 +194,22 @@ export default function App() {
           onSettings={() => openModal("settings")}
         />
       )}
-      {modal === "new" && <AppModal onSubmit={submitAdd} onClose={closeModal} />}
+      {modal === "new" && <RecipePicker recipes={recipes} onPick={(r) => setModal({ adding: r })} onClose={closeModal} />}
+      {typeof modal === "object" && modal !== null && "adding" in modal && (
+        <AppModal
+          recipe={modal.adding}
+          recipes={recipes}
+          onSubmit={submitAdd}
+          onBack={() => setModal("new")}
+          onClose={closeModal}
+        />
+      )}
       {modal === "settings" && <SettingsModal settings={settings} onPreview={setSettings} onChange={changeSettings} onClose={closeModal} />}
-      {typeof modal === "object" && modal !== null && (
+      {editedRecipe && typeof modal === "object" && modal !== null && "id" in modal && (
         <AppModal
           key={modal.id}
+          recipe={editedRecipe}
+          recipes={recipes}
           service={modal}
           onSubmit={submitEdit(modal.id)}
           onRemove={submitRemove(modal.id)}

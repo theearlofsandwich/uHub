@@ -133,6 +133,7 @@ impl<H> Registry<H> {
                 id: s.instance.id.clone(),
                 name: s.instance.name.clone(),
                 recipe: s.recipe.id,
+                team: s.instance.team.clone(),
                 url: s.url().to_owned(),
                 allowed_domains: s.allowed_domains().to_vec(),
                 profile: s.instance.profile.clone(),

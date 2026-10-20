@@ -11,7 +11,12 @@ pub type BadgeParser = fn(&str) -> Option<u32>;
 /// "Inbox (12) - ...". Thousands separators and a trailing "+" ("(99+)") are
 /// accepted. No "(N)" anywhere means nothing is unread.
 pub fn from_title(title: &str) -> Option<u32> {
-    Some(title.match_indices('(').find_map(|(i, _)| count_at(&title[i..])).unwrap_or(0))
+    Some(title.match_indices('(').find_map(|(i, _)| count_at(&title[i..], '(', ')')).unwrap_or(0))
+}
+
+/// Element: the first "[N]", as in "Element [3]". No "[N]" means nothing is unread.
+pub fn brackets(title: &str) -> Option<u32> {
+    Some(title.match_indices('[').find_map(|(i, _)| count_at(&title[i..], '[', ']')).unwrap_or(0))
 }
 
 /// Gmail: the default fails while a message is open, because the title is then
@@ -23,14 +28,14 @@ pub fn gmail(title: &str) -> Option<u32> {
     if rest.starts_with(" - ") {
         Some(0)
     } else {
-        count_at(rest.strip_prefix(' ')?)
+        count_at(rest.strip_prefix(' ')?, '(', ')')
     }
 }
 
-/// The count in a "(N)" at the very start of `s`.
-fn count_at(s: &str) -> Option<u32> {
-    let inner = &s[..s.find(')')?];
-    let digits = inner.strip_prefix('(')?;
+/// The count in a "(N)" (`open` N `close`) at the very start of `s`.
+fn count_at(s: &str, open: char, close: char) -> Option<u32> {
+    let inner = &s[..s.find(close)?];
+    let digits = inner.strip_prefix(open)?;
     let digits = digits.strip_suffix('+').unwrap_or(digits);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit() || b == b',') || digits.starts_with(',') {
         return None;
@@ -66,6 +71,15 @@ mod tests {
         for (title, want) in cases {
             assert_eq!(from_title(title), Some(want), "{title:?}");
         }
+    }
+
+    #[test]
+    fn brackets_parser() {
+        assert_eq!(brackets("Element [3]"), Some(3));
+        assert_eq!(brackets("Element [99+] | Room"), Some(99));
+        assert_eq!(brackets("Element"), Some(0));
+        assert_eq!(brackets("Element (3)"), Some(0));
+        assert_eq!(brackets("[dev] Element [2]"), Some(2));
     }
 
     #[test]

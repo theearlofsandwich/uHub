@@ -566,7 +566,7 @@ pub async fn add_service(app: AppHandle, state: State<'_, Services>, service: Ne
     let root = profiles_root(&app)?;
     let mut inner = state.0.lock().await;
     let id = inner.config.add(&service, |p| root.join(p).exists())?;
-    log::info!("[{id}] added ({})", service.url);
+    log::info!("[{id}] added ({})", service.recipe);
     emit_snapshot(&app, &inner);
     Ok(id)
 }
@@ -730,7 +730,7 @@ pub async fn update_service(
     let inner = &mut *guard;
     let old = inner.config.find(&id).ok_or_else(|| services::unknown(&id))?.clone();
     inner.config.update(&id, &service)?;
-    log::info!("[{id}] updated ({})", service.url);
+    log::info!("[{id}] updated ({})", service.recipe);
     let result = refresh(&app, inner, &old);
     emit_snapshot(&app, inner);
     result

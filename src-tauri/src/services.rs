@@ -1,7 +1,7 @@
 //! Service registry, Ferdium-style: compiled-in *recipes* (what a site is: URL,
 //! allowed domains, injected JS/CSS) and user-configured *instances* (an
-//! account of a recipe: name, storage profile, optional URL override), saved
-//! as JSON in `app_config_dir()/services.json`.
+//! account of a recipe: name, storage profile, team, optional URL), saved as
+//! JSON in `app_config_dir()/services.json`.
 //!
 //! Rust is the source of truth for URLs, allowed domains and profiles: the
 //! (trusted) React shell only ever sends an instance *id*, so a compromised or
@@ -9,15 +9,18 @@
 //! read from the config file is validated here (profile names become paths, URL
 //! overrides must stay within the recipe's domains) before it is used.
 //!
-//! Apps added by URL ("Add app" in the shell) use the recipe whose domains the
-//! URL is in, or else the [`CUSTOM`] recipe, which may navigate within the
-//! URL's site (see [`site_of`]).
+//! "Add app" in the shell picks a recipe from [`RECIPES`]. The [`CUSTOM`]
+//! recipe is any site: like a self-hosted one (see [`Hosting`]), it may
+//! navigate within its URL's site (see [`site_of`]). Recipe icons and
+//! addresses come from Ferdium's recipes (github.com/ferdium/ferdium-recipes,
+//! MIT); allowed domains are uHub's own.
 
 use crate::{
     badge::{self, BadgeParser},
     error::{Error, Result},
     navigation,
 };
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -31,12 +34,15 @@ use url::Host;
 pub struct Recipe {
     pub id: &'static str,
     pub name: &'static str,
+    /// The page a new instance loads. With `team`, "{team}" stands for the
+    /// instance's team; empty for a [`Hosting::SelfHosted`] recipe.
     pub url: &'static str,
     /// Host suffixes the webview may navigate within ("a.com" matches a.com and *.a.com).
     pub allowed_domains: &'static [&'static str],
     pub inject_js: &'static str,
     pub inject_css: &'static str,
     pub user_agent: Option<&'static str>,
+    /// SVG source.
     pub icon: Option<&'static str>,
     /// Reads the unread count from the page title; `None`: the site shows none.
     pub badge: Option<BadgeParser>,
@@ -46,12 +52,73 @@ pub struct Recipe {
     /// Default for `Instance::keep_alive`: messengers stay loaded in the
     /// background so their notifications keep arriving.
     pub keep_alive: bool,
+    /// Each instance names its team, which `url` is built from.
+    pub team: Option<TeamField>,
+    pub hosting: Hosting,
+    /// A note for the add/edit form.
+    pub message: Option<&'static str>,
 }
 
-/// Recipe id of an app added by a URL no other recipe covers. Its instances
-/// always carry their own URL, and their allowed domain is derived from it.
+/// How the add/edit form asks for a team (Ferdium's `hasTeamId`): Slack's
+/// workspace, shown as `prefix` [input] `suffix`.
+#[derive(Serialize, Clone, Copy, Debug)]
+pub struct TeamField {
+    pub label: &'static str,
+    pub prefix: &'static str,
+    pub suffix: &'static str,
+}
+
+/// Where a recipe's site runs.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Hosting {
+    /// Only at `url`; an instance's URL must stay within the recipe's domains.
+    Cloud,
+    /// At `url`, or on the user's own server: an instance URL outside the
+    /// recipe's domains is a server of its own, allowed only its own site.
+    Both,
+    /// Only on the user's own server: every instance has a URL, any http(s) one.
+    SelfHosted,
+}
+
+/// Recipe id of an app added by its URL: a self-hosted recipe without
+/// injections, for any site.
 pub const CUSTOM: &str = "custom";
 
+/// What every recipe has unless it says otherwise.
+const RECIPE: Recipe = Recipe {
+    id: "",
+    name: "",
+    url: "",
+    allowed_domains: &[],
+    inject_js: "",
+    inject_css: "",
+    user_agent: None,
+    icon: None,
+    badge: Some(badge::from_title),
+    user_media: false,
+    keep_alive: false,
+    team: None,
+    hosting: Hosting::Cloud,
+    message: None,
+};
+
+const GOOGLE: &[&str] = &["google.com", "gstatic.com", "googleusercontent.com"];
+/// Microsoft 365 apps and the Microsoft account / Entra ID sign-in they share.
+const MICROSOFT: &[&str] = &[
+    "cloud.microsoft",
+    "microsoft.com",
+    "office.com",
+    "office.net",
+    "office365.com",
+    "outlook.com",
+    "live.com",
+    "microsoftonline.com",
+    "msauth.net",
+    "msftauth.net",
+];
+
+/// In the order "Add app" lists them, [`CUSTOM`] last.
 pub const RECIPES: &[Recipe] = &[
     Recipe {
         id: "whatsapp",
@@ -60,24 +127,32 @@ pub const RECIPES: &[Recipe] = &[
         allowed_domains: &["whatsapp.com", "whatsapp.net"],
         inject_js: include_str!("../../services/whatsapp/inject.js"),
         inject_css: include_str!("../../services/whatsapp/inject.css"),
-        user_agent: None,
-        icon: None,
-        badge: Some(badge::from_title),
+        icon: Some(include_str!("../../services/whatsapp/icon.svg")),
         user_media: true,
         keep_alive: true,
+        ..RECIPE
     },
     Recipe {
         id: "gmail",
         name: "Gmail",
         url: "https://mail.google.com/",
-        allowed_domains: &["google.com", "gstatic.com", "googleusercontent.com"],
+        allowed_domains: GOOGLE,
         inject_js: include_str!("../../services/gmail/inject.js"),
         inject_css: include_str!("../../services/gmail/inject.css"),
-        user_agent: None,
-        icon: None,
+        icon: Some(include_str!("../../services/gmail/icon.svg")),
         badge: Some(badge::gmail),
-        user_media: false,
-        keep_alive: false,
+        ..RECIPE
+    },
+    Recipe {
+        id: "outlook",
+        name: "Outlook",
+        url: "https://outlook.cloud.microsoft/mail/",
+        allowed_domains: MICROSOFT,
+        icon: Some(include_str!("../../services/outlook/icon.svg")),
+        // The title carries no count.
+        badge: None,
+        hosting: Hosting::Both,
+        ..RECIPE
     },
     Recipe {
         id: "discord",
@@ -86,29 +161,193 @@ pub const RECIPES: &[Recipe] = &[
         allowed_domains: &["discord.com", "discordapp.com", "discordapp.net", "hcaptcha.com"],
         inject_js: include_str!("../../services/discord/inject.js"),
         inject_css: include_str!("../../services/discord/inject.css"),
-        user_agent: None,
-        icon: None,
-        badge: Some(badge::from_title),
+        icon: Some(include_str!("../../services/discord/icon.svg")),
         user_media: true,
         keep_alive: true,
+        ..RECIPE
     },
     Recipe {
-        id: CUSTOM,
-        name: "Custom",
-        url: "",
-        allowed_domains: &[],
-        inject_js: "",
-        inject_css: "",
-        user_agent: None,
-        icon: None,
-        badge: Some(badge::from_title),
+        id: "slack",
+        name: "Slack",
+        url: "https://{team}.slack.com/",
+        allowed_domains: &["slack.com", "slack-edge.com", "slack-imgs.com", "slack-files.com", "slackb.com"],
+        icon: Some(include_str!("../../services/slack/icon.svg")),
+        // Marks unread channels in the title, but without a count.
+        badge: None,
         user_media: true,
-        keep_alive: false,
+        keep_alive: true,
+        team: Some(TeamField { label: "Workspace", prefix: "", suffix: ".slack.com" }),
+        message: Some("The workspace's name from its Slack address, as in acme.slack.com"),
+        ..RECIPE
     },
+    Recipe {
+        id: "teams",
+        name: "Microsoft Teams",
+        url: "https://teams.cloud.microsoft/",
+        allowed_domains: MICROSOFT,
+        icon: Some(include_str!("../../services/teams/icon.svg")),
+        user_media: true,
+        keep_alive: true,
+        ..RECIPE
+    },
+    Recipe {
+        id: "telegram",
+        name: "Telegram",
+        url: "https://web.telegram.org/",
+        allowed_domains: &["telegram.org", "t.me"],
+        icon: Some(include_str!("../../services/telegram/icon.svg")),
+        user_media: true,
+        keep_alive: true,
+        ..RECIPE
+    },
+    Recipe {
+        id: "messenger",
+        name: "Messenger",
+        url: "https://www.messenger.com/",
+        allowed_domains: &["messenger.com", "facebook.com", "fbcdn.net", "fbsbx.com"],
+        icon: Some(include_str!("../../services/messenger/icon.svg")),
+        user_media: true,
+        keep_alive: true,
+        ..RECIPE
+    },
+    Recipe {
+        id: "google-chat",
+        name: "Google Chat",
+        url: "https://chat.google.com/",
+        allowed_domains: GOOGLE,
+        icon: Some(include_str!("../../services/google-chat/icon.svg")),
+        // The title is the open room's name, which may hold "(N)" itself.
+        badge: None,
+        user_media: true,
+        keep_alive: true,
+        ..RECIPE
+    },
+    Recipe {
+        id: "google-calendar",
+        name: "Google Calendar",
+        url: "https://calendar.google.com/",
+        allowed_domains: GOOGLE,
+        icon: Some(include_str!("../../services/google-calendar/icon.svg")),
+        badge: None,
+        ..RECIPE
+    },
+    Recipe {
+        id: "proton-mail",
+        name: "Proton Mail",
+        url: "https://mail.proton.me/",
+        allowed_domains: &["proton.me", "protonmail.com"],
+        icon: Some(include_str!("../../services/proton-mail/icon.svg")),
+        ..RECIPE
+    },
+    Recipe {
+        id: "element",
+        name: "Element",
+        url: "https://app.element.io/",
+        allowed_domains: &["element.io", "matrix.org"],
+        icon: Some(include_str!("../../services/element/icon.svg")),
+        badge: Some(badge::brackets),
+        user_media: true,
+        keep_alive: true,
+        hosting: Hosting::Both,
+        ..RECIPE
+    },
+    Recipe {
+        id: "mattermost",
+        name: "Mattermost",
+        icon: Some(include_str!("../../services/mattermost/icon.svg")),
+        user_media: true,
+        keep_alive: true,
+        hosting: Hosting::SelfHosted,
+        ..RECIPE
+    },
+    Recipe {
+        id: "linkedin",
+        name: "LinkedIn",
+        url: "https://www.linkedin.com/messaging/",
+        allowed_domains: &["linkedin.com", "licdn.com"],
+        icon: Some(include_str!("../../services/linkedin/icon.svg")),
+        ..RECIPE
+    },
+    Recipe {
+        id: "notion",
+        name: "Notion",
+        url: "https://www.notion.so/",
+        allowed_domains: &["notion.so", "notion.com"],
+        icon: Some(include_str!("../../services/notion/icon.svg")),
+        badge: None,
+        ..RECIPE
+    },
+    Recipe {
+        id: "trello",
+        name: "Trello",
+        url: "https://trello.com/",
+        allowed_domains: &["trello.com", "atlassian.com", "atl-paas.net"],
+        icon: Some(include_str!("../../services/trello/icon.svg")),
+        badge: None,
+        ..RECIPE
+    },
+    Recipe {
+        id: "github",
+        name: "GitHub",
+        url: "https://github.com/",
+        allowed_domains: &["github.com", "githubusercontent.com", "githubassets.com"],
+        icon: Some(include_str!("../../services/github/icon.svg")),
+        badge: None,
+        hosting: Hosting::Both,
+        ..RECIPE
+    },
+    Recipe {
+        id: "chatgpt",
+        name: "ChatGPT",
+        url: "https://chatgpt.com/",
+        // The Cloudflare host serves the bot check, in a frame.
+        allowed_domains: &["chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com", "challenges.cloudflare.com"],
+        icon: Some(include_str!("../../services/chatgpt/icon.svg")),
+        badge: None,
+        user_media: true,
+        ..RECIPE
+    },
+    Recipe {
+        id: "claude",
+        name: "Claude",
+        url: "https://claude.ai/",
+        allowed_domains: &["claude.ai", "claude.com", "anthropic.com", "challenges.cloudflare.com"],
+        icon: Some(include_str!("../../services/claude/icon.svg")),
+        badge: None,
+        user_media: true,
+        ..RECIPE
+    },
+    Recipe { id: CUSTOM, name: "Custom website", user_media: true, hosting: Hosting::SelfHosted, ..RECIPE },
 ];
 
 pub fn recipe(id: &str) -> Option<&'static Recipe> {
     RECIPES.iter().find(|r| r.id == id)
+}
+
+impl Recipe {
+    /// `url` for `team` (which only a recipe with a `team` field takes).
+    pub fn url_for(&self, team: Option<&str>) -> Result<Url> {
+        let url = match (self.team, team) {
+            (Some(_), Some(team)) => {
+                validate_team(team)?;
+                self.url.replace("{team}", team)
+            }
+            (Some(field), None) => return Err(Error::invalid(format!("{} needs a {}", self.name, field.label.to_lowercase()))),
+            (None, Some(_)) => return Err(Error::invalid(format!("{} has no team", self.name))),
+            (None, None) => self.url.to_owned(),
+        };
+        parse_app_url(&url)
+    }
+
+    /// `icon` as a data: URL.
+    pub fn icon_url(&self) -> Option<String> {
+        self.icon.map(|svg| format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg)))
+    }
+
+    /// Whether `url` is on the recipe's own site (over https).
+    fn covers(&self, url: &Url) -> bool {
+        url.scheme() == "https" && url.host_str().is_some_and(|h| navigation::host_allowed(h, self.allowed_domains))
+    }
 }
 
 /// One configured service, as stored in services.json.
@@ -121,7 +360,11 @@ pub struct Instance {
     /// Storage profile. Two services sharing a profile share cookies/storage;
     /// distinct profiles get distinct WebKit data directories.
     pub profile: String,
-    /// Replaces the recipe's URL; must be https within its allowed domains.
+    /// The team the recipe's URL is built from, for a recipe with a `team` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+    /// Replaces the recipe's URL: https within its allowed domains, or (as
+    /// its [`Hosting`] allows) the user's own server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default = "yes")]
@@ -161,14 +404,22 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Point at `url` (an instance of the recipe covering it, see
-    /// [`recipe_for`]) and take the form's options. Id, profile and order stay.
+    /// Take the form's recipe, team, URL and options; [`Service::new`]
+    /// validates the result. Id, profile and order stay.
     fn apply(&mut self, new: &NewService) -> Result<()> {
-        let url = parse_app_url(new.url.trim())?;
-        let recipe = recipe_for(&url);
+        let recipe = recipe(&new.recipe).ok_or_else(|| Error::invalid(format!("unknown recipe {:?}", new.recipe)))?;
+        let filled = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
         self.name = validate_name(&new.name)?;
         self.recipe = recipe.id.into();
-        self.url = (url.as_str() != recipe.url).then(|| url.to_string());
+        self.team = filled(&new.team).map(|t| t.to_ascii_lowercase());
+        self.url = match filled(&new.url) {
+            // The recipe's own URL isn't stored, so the instance follows it.
+            Some(url) => {
+                let url = parse_app_url(&url)?;
+                (recipe.url_for(self.team.as_deref()).ok() != Some(url.clone())).then(|| url.to_string())
+            }
+            None => None,
+        };
         self.enabled = new.enabled;
         self.permissions.notifications = new.notifications;
         self.keep_alive = Some(!new.hibernation);
@@ -189,6 +440,7 @@ impl Instance {
             id,
             name,
             recipe: recipe.into(),
+            team: None,
             url: None,
             enabled: true,
             order,
@@ -205,13 +457,18 @@ impl Instance {
     }
 }
 
-/// What the shell's "Add app" and "Edit app" forms send: the app's URL rather
-/// than a recipe.
+/// What the shell's "Add app" and "Edit app" forms send.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct NewService {
     pub name: String,
-    pub url: String,
+    pub recipe: String,
+    /// For a recipe with a `team` field.
+    #[serde(default)]
+    pub team: Option<String>,
+    /// `None` (or blank) for the recipe's own URL; required by a self-hosted recipe.
+    #[serde(default)]
+    pub url: Option<String>,
     pub icon: Option<String>,
     pub notifications: bool,
     pub audio: bool,
@@ -391,7 +648,9 @@ pub enum PermissionKind {
 pub struct Service {
     pub instance: Instance,
     pub recipe: &'static Recipe,
-    /// The recipe's domains, or for a custom app the site of its URL.
+    /// The instance's URL, else the recipe's (for its team).
+    url: String,
+    /// The recipe's domains, or for a self-hosted app the site of its URL.
     allowed: Vec<String>,
 }
 
@@ -427,22 +686,31 @@ pub fn validate_name(name: &str) -> Result<String> {
     Ok(name.to_owned())
 }
 
-/// A URL override may change the path or subdomain, never the site. A custom
-/// app's URL may be any http(s) URL.
+/// A URL override of a hosted recipe may change the path or subdomain, never
+/// the site.
 pub fn validate_url_override(recipe: &Recipe, url: &str) -> Result<Url> {
     let parsed = parse_app_url(url)?;
-    if recipe.id == CUSTOM {
-        return Ok(parsed);
-    }
     if parsed.scheme() != "https" {
         return Err(Error::invalid(format!("url {url:?} must use https")));
     }
-    match parsed.host_str() {
-        Some(h) if navigation::host_allowed(h, recipe.allowed_domains) => Ok(parsed),
-        _ => Err(Error::invalid(format!(
-            "url {url:?} is outside {}'s domains {:?}",
-            recipe.id, recipe.allowed_domains
-        ))),
+    if recipe.covers(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(Error::invalid(format!("url {url:?} is outside {}'s domains {:?}", recipe.id, recipe.allowed_domains)))
+    }
+}
+
+/// A team becomes a subdomain: one DNS label, lowercase.
+pub fn validate_team(team: &str) -> Result<()> {
+    let ok = !team.is_empty()
+        && team.len() <= 63
+        && !team.starts_with('-')
+        && !team.ends_with('-')
+        && team.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!("invalid team {team:?}: use 1-63 of a-z, 0-9 and inner '-'")))
     }
 }
 
@@ -458,21 +726,34 @@ pub fn parse_app_url(url: &str) -> Result<Url> {
     Ok(parsed)
 }
 
-/// The recipe an app at `url` is an instance of: the first whose domains it is
-/// in (over https), else [`CUSTOM`].
-fn recipe_for(url: &Url) -> &'static Recipe {
-    RECIPES
-        .iter()
-        .find(|r| {
-            r.id != CUSTOM
-                && url.scheme() == "https"
-                && url.host_str().is_some_and(|h| navigation::host_allowed(h, r.allowed_domains))
-        })
-        .or_else(|| recipe(CUSTOM))
-        .expect("the custom recipe exists")
+/// The URL `instance` of `recipe` loads and the domains it may navigate
+/// within, as its [`Hosting`] has them.
+fn resolve(recipe: &Recipe, instance: &Instance) -> Result<(Url, Vec<String>)> {
+    if let (None, Some(team)) = (recipe.team, &instance.team) {
+        return Err(Error::invalid(format!("{} has no team, got {team:?}", recipe.name)));
+    }
+    let own = || recipe.allowed_domains.iter().map(|d| (*d).to_owned()).collect();
+    let Some(url) = &instance.url else {
+        if recipe.hosting == Hosting::SelfHosted {
+            return Err(Error::invalid(format!("{} needs its address", recipe.name)));
+        }
+        return Ok((recipe.url_for(instance.team.as_deref())?, own()));
+    };
+    let parsed = parse_app_url(url)?;
+    let own_server = match recipe.hosting {
+        Hosting::SelfHosted => true,
+        Hosting::Both => !recipe.covers(&parsed),
+        Hosting::Cloud => false,
+    };
+    if own_server {
+        let site = site_of(&parsed);
+        Ok((parsed, vec![site]))
+    } else {
+        Ok((validate_url_override(recipe, url)?, own()))
+    }
 }
 
-/// The site a custom app may navigate within: its URL's host without
+/// The site a self-hosted app may navigate within: its URL's host without
 /// subdomains ("app.slack.com" -> "slack.com"), so logins elsewhere on the
 /// site work. Without the public suffix list this is a guess: a short label
 /// under a two-letter TLD counts as part of the suffix ("bbc.co.uk", not
@@ -514,23 +795,14 @@ impl Service {
         validate_profile(&instance.profile)?;
         validate_name(&instance.name)?;
         let recipe = recipe(&instance.recipe).ok_or_else(|| Error::invalid(format!("unknown recipe {:?}", instance.recipe)))?;
-        let allowed = match (&instance.url, recipe.id) {
-            (Some(url), CUSTOM) => vec![site_of(&validate_url_override(recipe, url)?)],
-            (None, CUSTOM) => return Err(Error::invalid(format!("custom service {:?} has no url", instance.id))),
-            (url, _) => {
-                if let Some(url) = url {
-                    validate_url_override(recipe, url)?;
-                }
-                recipe.allowed_domains.iter().map(|d| (*d).to_owned()).collect()
-            }
-        };
+        let (url, allowed) = resolve(recipe, &instance)?;
         if let Some(icon) = &instance.icon {
             validate_icon(icon)?;
         }
         if instance.hibernate_after_minutes.is_some_and(|m| m == 0 || m > MAX_HIBERNATE_MINUTES) {
             return Err(Error::invalid("hibernate after must be between a minute and a week"));
         }
-        Ok(Self { instance, recipe, allowed })
+        Ok(Self { instance, recipe, url: url.into(), allowed })
     }
 
     pub fn id(&self) -> &str {
@@ -538,7 +810,7 @@ impl Service {
     }
 
     pub fn url(&self) -> &str {
-        self.instance.url.as_deref().unwrap_or(self.recipe.url)
+        &self.url
     }
 
     pub fn allowed_domains(&self) -> &[String] {
@@ -547,7 +819,7 @@ impl Service {
 
     /// The instance's own icon, else the recipe's.
     pub fn icon(&self) -> Option<String> {
-        self.instance.icon.clone().or_else(|| self.recipe.icon.map(String::from))
+        self.instance.icon.clone().or_else(|| self.recipe.icon_url())
     }
 
     pub fn keep_alive(&self) -> bool {
@@ -769,8 +1041,7 @@ impl Config {
     /// reports leftover profile directories, which are never reused: a new
     /// account must not inherit an old login. Returns the new id.
     pub fn add(&mut self, new: &NewService, profile_taken: impl Fn(&str) -> bool) -> Result<String> {
-        let url = parse_app_url(new.url.trim())?;
-        let recipe = recipe_for(&url);
+        let recipe = recipe(&new.recipe).ok_or_else(|| Error::invalid(format!("unknown recipe {:?}", new.recipe)))?;
         let id = fresh_id(recipe.id, unix_millis(), |c| {
             self.services().iter().any(|s| s.instance.id == c || s.instance.profile == c) || profile_taken(c)
         });
@@ -783,8 +1054,8 @@ impl Config {
         Ok(id)
     }
 
-    /// Replace `id`'s settings with the "Edit app" form's. A new URL may make
-    /// it an instance of another recipe; it keeps its id and profile (logins).
+    /// Replace `id`'s settings with the "Edit app" form's. It may become an
+    /// instance of another recipe; it keeps its id and profile (logins).
     pub fn update(&mut self, id: &str, new: &NewService) -> Result<()> {
         let mut next = self.saved.clone();
         let svc = next.services.iter_mut().find(|s| s.id() == id).ok_or_else(|| unknown(id))?;
@@ -942,6 +1213,7 @@ pub struct ServiceInfo {
     pub id: String,
     pub name: String,
     pub recipe: &'static str,
+    pub team: Option<String>,
     pub url: String,
     pub allowed_domains: Vec<String>,
     pub profile: String,
@@ -971,14 +1243,27 @@ pub struct RecipeInfo {
     pub name: &'static str,
     pub url: &'static str,
     pub allowed_domains: &'static [&'static str],
-    pub icon: Option<&'static str>,
+    /// A data: URL.
+    pub icon: Option<String>,
+    pub team: Option<TeamField>,
+    pub hosting: Hosting,
+    pub message: Option<&'static str>,
 }
 
+/// [`RECIPES`], in order.
 pub fn recipe_infos() -> Vec<RecipeInfo> {
     RECIPES
         .iter()
-        .filter(|r| r.id != CUSTOM)
-        .map(|r| RecipeInfo { id: r.id, name: r.name, url: r.url, allowed_domains: r.allowed_domains, icon: r.icon })
+        .map(|r| RecipeInfo {
+            id: r.id,
+            name: r.name,
+            url: r.url,
+            allowed_domains: r.allowed_domains,
+            icon: r.icon_url(),
+            team: r.team,
+            hosting: r.hosting,
+            message: r.message,
+        })
         .collect()
 }
 
@@ -1094,10 +1379,13 @@ mod tests {
         assert!(validate_name("a\nb").is_err());
     }
 
-    fn new_app(name: &str, url: &str) -> NewService {
+    /// The form for an app of `recipe`; a blank `url` is the recipe's own.
+    fn new_app(name: &str, recipe: &str, url: &str) -> NewService {
         NewService {
             name: name.into(),
-            url: url.into(),
+            recipe: recipe.into(),
+            team: None,
+            url: Some(url.into()),
             icon: None,
             notifications: true,
             audio: true,
@@ -1115,14 +1403,15 @@ mod tests {
     fn add_remove_rename_reorder() {
         let path = temp_dir("mutate").join("services.json");
         let mut c = Config::load(path.clone()).unwrap();
-        let id = c.add(&new_app("Gmail (Side)", "https://mail.google.com/"), |_| false).unwrap();
+        let id = c.add(&new_app("Gmail (Side)", "gmail", "https://mail.google.com/"), |_| false).unwrap();
         assert!(id.starts_with("gmail-"));
         let new = c.find(&id).unwrap();
         assert_eq!(new.instance.profile, id);
         assert_eq!(new.instance.order, 4);
         assert_eq!(new.instance.url, None, "the recipe's own url isn't stored");
-        assert!(c.add(&new_app("X", "ftp://example.com/"), |_| false).is_err());
-        assert!(c.add(&new_app(" ", "https://mail.google.com/"), |_| false).is_err());
+        assert!(c.add(&new_app("X", CUSTOM, "ftp://example.com/"), |_| false).is_err());
+        assert!(c.add(&new_app(" ", "gmail", ""), |_| false).is_err());
+        assert!(c.add(&new_app("X", "nope", ""), |_| false).is_err());
 
         let mut order: Vec<String> = ids(&c).into_iter().rev().map(String::from).collect();
         c.reorder(&order).unwrap();
@@ -1253,17 +1542,20 @@ mod tests {
     }
 
     #[test]
-    fn add_by_url_picks_recipe_or_custom_and_keeps_options() {
+    fn add_custom_keeps_options() {
         let path = temp_dir("add-url").join("services.json");
         let mut c = Config::load(path.clone()).unwrap();
 
-        let wa = c.add(&new_app("WA 2", "https://web.whatsapp.com/"), |_| false).unwrap();
-        assert_eq!(c.find(&wa).unwrap().recipe.id, "whatsapp");
-        // http never matches a recipe (their overrides must be https).
-        let plain = c.add(&new_app("WA http", "http://web.whatsapp.com/"), |_| false).unwrap();
-        assert_eq!(c.find(&plain).unwrap().recipe.id, CUSTOM);
+        let wa = c.add(&new_app("WA 2", "whatsapp", ""), |_| false).unwrap();
+        let wa = c.find(&wa).unwrap();
+        assert_eq!((wa.recipe.id, wa.url()), ("whatsapp", "https://web.whatsapp.com/"));
+        // A custom app stays custom, whatever its site.
+        let plain = c.add(&new_app("WA http", CUSTOM, "http://web.whatsapp.com/"), |_| false).unwrap();
+        let plain = c.find(&plain).unwrap();
+        assert_eq!((plain.recipe.id, plain.allowed_domains()), (CUSTOM, &["whatsapp.com".to_owned()][..]));
+        assert!(c.add(&new_app("X", CUSTOM, " "), |_| false).is_err(), "custom needs a url");
 
-        let mut opts = new_app("Slack", " https://app.slack.com/client ");
+        let mut opts = new_app("Slack", CUSTOM, " https://app.slack.com/client ");
         opts.icon = Some("data:image/png;base64,iVBORw0KGgo=".into());
         opts.audio = false;
         opts.hibernation = false;
@@ -1287,20 +1579,20 @@ mod tests {
         assert!(!inst.audio && !inst.enabled && inst.open_links_inside && inst.start_hibernated);
         assert_eq!(inst.hibernate_after_minutes, Some(30));
 
-        let mut bad = new_app("X", "https://x.example/");
+        let mut bad = new_app("X", CUSTOM, "https://x.example/");
         bad.icon = Some("https://x.example/favicon.ico".into());
         assert!(c.add(&bad, |_| false).is_err(), "remote icon");
-        let mut bad = new_app("X", "https://x.example/");
+        let mut bad = new_app("X", CUSTOM, "https://x.example/");
         bad.hibernate_after_minutes = 0;
         assert!(c.add(&bad, |_| false).is_err());
-        assert!(c.add(&new_app("X", "https://user:pw@x.example/"), |_| false).is_err());
+        assert!(c.add(&new_app("X", CUSTOM, "https://user:pw@x.example/"), |_| false).is_err());
     }
 
     #[test]
     fn update_keeps_id_and_profile_and_may_change_recipe() {
         let path = temp_dir("update").join("services.json");
         let mut c = Config::load(path.clone()).unwrap();
-        let mut opts = new_app("Mail", "https://mail.google.com/mail/u/1/");
+        let mut opts = new_app("Mail", "gmail", "https://mail.google.com/mail/u/1/");
         opts.audio = false;
         opts.hibernation = false;
         c.update("gmail-work", &opts).unwrap();
@@ -1309,13 +1601,14 @@ mod tests {
         assert_eq!(svc.url(), "https://mail.google.com/mail/u/1/");
         assert!(!svc.instance.audio && svc.keep_alive());
 
-        c.update("gmail-work", &new_app("Slack", "https://app.slack.com/")).unwrap();
+        assert!(c.update("gmail-work", &new_app("Mail", "gmail", "https://app.slack.com/")).is_err(), "off the recipe's site");
+        c.update("gmail-work", &new_app("Slack", CUSTOM, "https://app.slack.com/")).unwrap();
         let svc = c.find("gmail-work").unwrap();
         assert_eq!((svc.recipe.id, svc.instance.profile.as_str()), (CUSTOM, "gmail-work"));
         assert_eq!(svc.allowed_domains(), ["slack.com"]);
 
-        assert!(c.update("gmail-work", &new_app(" ", "https://app.slack.com/")).is_err());
-        assert!(c.update("nope", &new_app("X", "https://x.example/")).is_err());
+        assert!(c.update("gmail-work", &new_app(" ", CUSTOM, "https://app.slack.com/")).is_err());
+        assert!(c.update("nope", &new_app("X", CUSTOM, "https://x.example/")).is_err());
         let reloaded = Config::load(path).unwrap();
         assert_eq!(reloaded.find("gmail-work").unwrap().instance, c.find("gmail-work").unwrap().instance);
     }
@@ -1329,7 +1622,72 @@ mod tests {
         let s = parse(json).unwrap().services;
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].allowed_domains(), ["192.168.1.10"]);
-        assert!(recipe_infos().iter().all(|r| r.id != CUSTOM), "not offered as a recipe");
+    }
+
+    #[test]
+    fn team_recipes_build_their_url() {
+        let path = temp_dir("team").join("services.json");
+        let mut c = Config::load(path.clone()).unwrap();
+        let mut opts = new_app("Acme", "slack", "");
+        opts.team = Some(" Acme ".into());
+        let id = c.add(&opts, |_| false).unwrap();
+        let slack = c.find(&id).unwrap();
+        assert_eq!(slack.instance.team.as_deref(), Some("acme"));
+        assert_eq!(slack.instance.url, None);
+        assert_eq!(slack.url(), "https://acme.slack.com/");
+        assert!(slack.allowed_domains().iter().any(|d| d == "slack-edge.com"));
+        assert_eq!(Config::load(path).unwrap().find(&id).unwrap().url(), "https://acme.slack.com/");
+
+        for bad in [None, Some(" "), Some("a.b"), Some("-acme"), Some("acme-"), Some("évil"), Some("a/b")] {
+            let mut opts = new_app("Acme", "slack", "");
+            opts.team = bad.map(String::from);
+            assert!(c.add(&opts, |_| false).is_err(), "{bad:?}");
+        }
+        // A team on a recipe without one is refused, not silently dropped from files.
+        let json = r#"{"version":1,"services":[{"id":"a","name":"A","recipe":"gmail","profile":"a","team":"x"}]}"#;
+        assert!(parse(json).unwrap().services.is_empty());
+    }
+
+    #[test]
+    fn hosting_decides_where_an_instance_may_point() {
+        let path = temp_dir("hosting").join("services.json");
+        let mut c = Config::load(path).unwrap();
+        let mut add = |recipe: &str, url: &str| c.add(&new_app("X", recipe, url), |_| false).map(|id| c.find(&id).unwrap().clone());
+
+        // The recipe's own URL isn't stored, however it's written.
+        let outlook = add("outlook", "https://outlook.cloud.microsoft/mail/").unwrap();
+        assert_eq!(outlook.instance.url, None);
+        let outlook = add("outlook", "https://outlook.office.com/mail/").unwrap();
+        assert_eq!(outlook.url(), "https://outlook.office.com/mail/");
+        assert!(outlook.allowed_domains().iter().any(|d| d == "microsoftonline.com"));
+        // Hosted or not: an address off the recipe's site is the user's own server.
+        let exchange = add("outlook", "https://mail.example.org/owa/").unwrap();
+        assert_eq!(exchange.allowed_domains(), ["example.org"]);
+        assert!(add("gmail", "https://mail.example.org/").is_err(), "cloud only");
+
+        assert!(add("mattermost", "").is_err(), "self-hosted needs a url");
+        let mm = add("mattermost", "http://chat.example.org:8065/").unwrap();
+        assert_eq!((mm.url(), mm.allowed_domains()), ("http://chat.example.org:8065/", &["example.org".to_owned()][..]));
+    }
+
+    #[test]
+    fn recipes_are_well_formed() {
+        let infos = recipe_infos();
+        assert_eq!(infos.len(), RECIPES.len());
+        assert_eq!(infos.last().unwrap().id, CUSTOM, "offered last");
+        for (i, r) in RECIPES.iter().enumerate() {
+            validate_token("recipe id", r.id).unwrap();
+            assert!(RECIPES[..i].iter().all(|o| o.id != r.id), "{} twice", r.id);
+            assert_eq!(r.url.contains("{team}"), r.team.is_some(), "{}", r.id);
+            if let Some(icon) = r.icon_url() {
+                validate_icon(&icon).unwrap_or_else(|e| panic!("{}: {e}", r.id));
+            }
+            match (r.hosting, r.team) {
+                (Hosting::SelfHosted, _) => assert!(r.url.is_empty() && r.allowed_domains.is_empty(), "{}", r.id),
+                (_, Some(_)) => assert!(r.covers(&r.url_for(Some("acme")).unwrap()), "{}", r.id),
+                (_, None) => assert!(r.covers(&r.url_for(None).unwrap()), "{}: url off its domains", r.id),
+            }
+        }
     }
 
     #[test]

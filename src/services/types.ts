@@ -7,6 +7,8 @@ export interface Service {
   name: string;
   /** Recipe id, see `Recipe`. */
   recipe: string;
+  /** For a recipe with a `team` field. */
+  team: string | null;
   url: string;
   allowedDomains: string[];
   /** Storage profile; distinct profiles => isolated cookies/storage. */
@@ -40,8 +42,12 @@ export interface Service {
 /** Mirrors `NewService` in src-tauri/src/services.rs: what "Add app" creates and "Edit app" saves. */
 export interface NewService {
   name: string;
-  /** http(s); the recipe (WhatsApp, Gmail...) is picked from it. */
-  url: string;
+  /** Recipe id. */
+  recipe: string;
+  /** Required by a recipe with a `team` field, else null. */
+  team: string | null;
+  /** http(s); null for the recipe's own. Required by a self-hosted recipe. */
+  url: string | null;
   /** A data: URL; null for none. */
   icon: string | null;
   notifications: boolean;
@@ -89,10 +95,32 @@ export type IconSize = "extra-small" | "small" | "medium" | "large" | "extra-lar
 export interface Recipe {
   id: string;
   name: string;
+  /** With `team`, "{team}" stands for the team; empty if self-hosted. */
   url: string;
   allowedDomains: string[];
+  /** A data: URL. */
   icon: string | null;
+  team: TeamField | null;
+  hosting: Hosting;
+  /** A note for the add/edit form. */
+  message: string | null;
 }
+
+/** Mirrors `TeamField`: the team input, shown as `prefix` [input] `suffix`. */
+export interface TeamField {
+  label: string;
+  prefix: string;
+  suffix: string;
+}
+
+/**
+ * Mirrors `Hosting`. "cloud": only at the recipe's URL (or elsewhere on its
+ * domains); "both": that or the user's own server; "selfHosted": only the user's own.
+ */
+export type Hosting = "cloud" | "both" | "selfHosted";
+
+/** Recipe id of an app added by its address: any site. */
+export const CUSTOM = "custom";
 
 /** Mirrors `Error::kind` in src-tauri/src/error.rs. */
 export type ErrorKind =

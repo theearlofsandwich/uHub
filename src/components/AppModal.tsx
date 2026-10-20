@@ -1,14 +1,20 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { inspectSite } from "../services/api";
-import type { NewService, Service, SiteInfo } from "../services/types";
+import { CUSTOM, type NewService, type Recipe, type Service, type SiteInfo } from "../services/types";
 
 interface Props {
+  /** What the app is (or, editing, was) an instance of. */
+  recipe: Recipe;
+  /** Every recipe, to suggest one for a custom website's address. */
+  recipes: Recipe[];
   /** The app to edit; absent to add a new one. */
   service?: Service;
   /** Rejects with a `CommandError` (or anything) to keep the modal open and show it. */
   onSubmit: (service: NewService) => Promise<void>;
   /** Editing only: remove the app, and with `deleteProfile` its login data. Rejects like `onSubmit`. */
   onRemove?: (deleteProfile: boolean) => Promise<void>;
+  /** Adding only: back to the list of apps. */
+  onBack?: () => void;
   onClose: () => void;
 }
 
@@ -26,7 +32,7 @@ const ICON_SIZE = 128;
 /** Wait for typing to pause before fetching the site. */
 const INSPECT_DELAY_MS = 600;
 
-type Options = Omit<NewService, "name" | "url" | "icon">;
+type Options = Omit<NewService, "name" | "recipe" | "team" | "url" | "icon">;
 
 const DEFAULTS: Options = {
   notifications: true,
@@ -71,6 +77,25 @@ function normalizeUrl(input: string): string | null {
   }
 }
 
+/** The host of `recipe`'s own URL, with "{team}" for its team, or null if it has none. */
+function homeHost(recipe: Recipe): string | null {
+  return recipe.url.match(/^https:\/\/([^/]+)/)?.[1]?.replace(/^www\./, "") ?? null;
+}
+
+/** The (hosted) recipe whose home `url` is on, as in web.whatsapp.com or acme.slack.com. */
+function recipeAt(url: string, recipes: Recipe[]): Recipe | null {
+  const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  return (
+    recipes.find((r) => {
+      const home = homeHost(r);
+      if (!home || r.hosting === "selfHosted") return false;
+      const [before, after] = home.split("{team}");
+      if (after === undefined) return host === home;
+      return host.length > before.length + after.length && host.startsWith(before) && host.endsWith(after);
+    }) ?? null
+  );
+}
+
 function message(e: unknown): string {
   return typeof e === "object" && e !== null && "message" in e ? String(e.message) : String(e);
 }
@@ -109,14 +134,21 @@ type Site =
   | { status: "error"; url: string; error: string };
 
 /**
- * "Add app", or "Edit app" given a `service`: name, address, icon and per-app
+ * "Add app" for a `recipe` (after RecipePicker), or "Edit app" given a
+ * `service`: name, address (as the recipe asks for it), icon and per-app
  * options. Rendered while the shell covers the window.
  */
-export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
+export function AppModal({ recipe: initialRecipe, recipes, service, onSubmit, onRemove, onBack, onClose }: Props) {
+  // A custom website may turn out to be a known app (see `suggested`).
+  const [recipe, setRecipe] = useState(initialRecipe);
   const [name, setName] = useState(service?.name ?? "");
-  const [address, setAddress] = useState(service?.url ?? "");
-  // An app's current icon counts as custom, so the site's doesn't replace it.
-  const [customIcon, setCustomIcon] = useState<string | null>(service?.icon ?? null);
+  const [team, setTeam] = useState(service?.team ?? "");
+  // A hosted app's own URL shows as the placeholder, not as typed text.
+  const [address, setAddress] = useState(service && service.url !== initialRecipe.url ? service.url : "");
+  // An app's current icon counts as custom, so the site's doesn't replace it; the recipe's doesn't count.
+  const [customIcon, setCustomIcon] = useState<string | null>(
+    service?.icon && service.icon !== initialRecipe.icon ? service.icon : null,
+  );
   const [iconError, setIconError] = useState<string | null>(null);
   const [opts, setOpts] = useState<Options>(service ? optionsOf(service) : DEFAULTS);
   const [site, setSite] = useState<Site>({ status: "idle" });
@@ -125,7 +157,8 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
   const [deleteProfile, setDeleteProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleId = useId();
-  const title = service ? "Edit app" : "Add app";
+  const isCustom = recipe.id === CUSTOM;
+  const title = service ? "Edit app" : isCustom ? "Add website" : `Add ${recipe.name}`;
   // An edited app may have a delay the presets don't offer.
   const hibernateOptions = HIBERNATE_OPTIONS.some((o) => o.minutes === opts.hibernateAfterMinutes)
     ? HIBERNATE_OPTIONS
@@ -133,31 +166,36 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
         (a, b) => a.minutes - b.minutes,
       );
 
-  const url = normalizeUrl(address);
-  const siteInfo = site.status === "done" && site.url === url ? site.info : null;
-  const icon = customIcon ?? siteInfo?.icon ?? null;
-  const fallbackName = siteInfo?.name ?? (url ? new URL(url).hostname.replace(/^www\./, "") : "");
+  const url = recipe.team ? null : normalizeUrl(address);
+  // Blank is the recipe's own address, unless it has none.
+  const addressOk = recipe.team ? team.trim() !== "" : url !== null || (address.trim() === "" && recipe.hosting !== "selfHosted");
+  // Only a site without a recipe icon is looked up, for its own name and icon.
+  const lookUp = recipe.icon ? null : url;
+  const siteInfo = site.status === "done" && site.url === lookUp ? site.info : null;
+  const icon = customIcon ?? recipe.icon ?? siteInfo?.icon ?? null;
+  const fallbackName = isCustom ? (siteInfo?.name ?? (url ? new URL(url).hostname.replace(/^www\./, "") : "")) : recipe.name;
+  const suggested = isCustom && url ? recipeAt(url, recipes) : null;
   const set = <K extends keyof Options>(key: K) => (value: Options[K]) => setOpts((o) => ({ ...o, [key]: value }));
 
   // Fetch the site's name and icon once the address stops changing.
   useEffect(() => {
-    if (!url) {
+    if (!lookUp) {
       setSite({ status: "idle" });
       return;
     }
     let current = true;
-    setSite({ status: "loading", url });
+    setSite({ status: "loading", url: lookUp });
     const timer = setTimeout(() => {
-      inspectSite(url).then(
-        (info) => current && setSite({ status: "done", url, info }),
-        (e) => current && setSite({ status: "error", url, error: message(e) }),
+      inspectSite(lookUp).then(
+        (info) => current && setSite({ status: "done", url: lookUp, info }),
+        (e) => current && setSite({ status: "error", url: lookUp, error: message(e) }),
       );
     }, INSPECT_DELAY_MS);
     return () => {
       current = false;
       clearTimeout(timer);
     };
-  }, [url]);
+  }, [lookUp]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && !submitting && onClose();
@@ -183,17 +221,32 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
     }
   };
   const submit = async () => {
-    if (!url || submitting) return;
-    await busy(() => onSubmit({ ...opts, name: name.trim() || fallbackName, url, icon }));
+    if (!addressOk || submitting) return;
+    await busy(() =>
+      onSubmit({
+        ...opts,
+        name: name.trim() || fallbackName,
+        recipe: recipe.id,
+        team: recipe.team ? team.trim() : null,
+        url,
+        // The recipe's icon isn't stored, so the app follows it.
+        icon: customIcon ?? (recipe.icon ? null : (siteInfo?.icon ?? null)),
+      }),
+    );
   };
 
   let iconStatus: string;
   if (customIcon) iconStatus = "Custom icon";
+  else if (recipe.icon) iconStatus = `${recipe.name}'s icon`;
   else if (!url) iconStatus = "Enter the site address to use its icon";
   else if (site.status === "loading") iconStatus = "Looking up the site's icon…";
   else if (site.status === "error") iconStatus = "Couldn't reach the site; drop an icon instead";
   else if (siteInfo?.icon) iconStatus = "The site's icon";
   else iconStatus = "The site has no icon; drop one instead";
+
+  let addressHint: string | null = null;
+  if (recipe.hosting === "both") addressHint = `Blank for ${recipe.name}'s own, or your own server's address`;
+  else if (recipe.hosting === "cloud") addressHint = `Blank for ${recipe.name}'s own`;
 
   return (
     <div className="modal-backdrop">
@@ -208,6 +261,11 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
         }}
       >
         <header className="modal-header">
+          {onBack && (
+            <button type="button" className="icon-button" aria-label="Back to the apps" onClick={onBack} disabled={submitting}>
+              ‹
+            </button>
+          )}
           <h2 id={titleId}>{title}</h2>
           <button type="button" className="icon-button" aria-label="Close" onClick={onClose} disabled={submitting}>
             ×
@@ -228,25 +286,60 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
                   onChange={(e) => setName(e.target.value)}
                 />
               </label>
-              <label className="text-field">
-                <span>Site address</span>
-                <input
-                  type="url"
-                  inputMode="url"
-                  spellCheck={false}
-                  value={address}
-                  placeholder="https://app.slack.com"
-                  aria-invalid={address.trim() !== "" && !url}
-                  onChange={(e) => setAddress(e.target.value)}
-                />
-              </label>
+              {recipe.team ? (
+                <label className="text-field">
+                  <span>{recipe.team.label}</span>
+                  <span className="affixed">
+                    {recipe.team.prefix && <span>{recipe.team.prefix}</span>}
+                    <input
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      value={team}
+                      maxLength={63}
+                      placeholder="acme"
+                      onChange={(e) => setTeam(e.target.value)}
+                    />
+                    {recipe.team.suffix && <span>{recipe.team.suffix}</span>}
+                  </span>
+                </label>
+              ) : (
+                <label className="text-field">
+                  <span>{recipe.hosting === "selfHosted" && !isCustom ? "Server address" : "Site address"}</span>
+                  <input
+                    type="url"
+                    inputMode="url"
+                    spellCheck={false}
+                    value={address}
+                    placeholder={recipe.url || (isCustom ? "https://example.com" : "https://chat.example.com")}
+                    aria-invalid={address.trim() !== "" && !url}
+                    onChange={(e) => setAddress(e.target.value)}
+                  />
+                  {addressHint && <small>{addressHint}</small>}
+                </label>
+              )}
             </div>
           </div>
+          {recipe.message && <p className="recipe-message">{recipe.message}</p>}
+          {suggested && (
+            <p className="recipe-message">
+              This looks like {suggested.name}, which uHub knows how to host.
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => {
+                  setRecipe(suggested);
+                  if (suggested.team) setAddress("");
+                }}
+              >
+                Add it as {suggested.name}
+              </button>
+            </p>
+          )}
           <p className="icon-status">
             {iconStatus}
             {customIcon && (
               <button type="button" className="link-button" onClick={() => setCustomIcon(null)}>
-                Use the site's icon
+                {recipe.icon ? `Use ${recipe.name}'s icon` : "Use the site's icon"}
               </button>
             )}
             {iconError && <span className="field-error">{iconError}</span>}
@@ -366,7 +459,7 @@ export function AppModal({ service, onSubmit, onRemove, onClose }: Props) {
               <button type="button" className="button" onClick={onClose} disabled={submitting}>
                 Cancel
               </button>
-              <button type="submit" className="button primary" disabled={!url || submitting}>
+              <button type="submit" className="button primary" disabled={!addressOk || submitting}>
                 {service ? (submitting ? "Saving…" : "Save") : submitting ? "Adding…" : "Add app"}
               </button>
             </>
