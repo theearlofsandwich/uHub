@@ -16,10 +16,11 @@ use tauri::{webview::WebviewBuilder, AppHandle, Runtime, Webview, Window, Window
 use webkit2gtk::{
     gio,
     glib::{gobject_ffi, translate::IntoGlib, StaticType},
-    ContextMenu, ContextMenuAction, ContextMenuExt, ContextMenuItem, ContextMenuItemExt, GeolocationPermissionRequest,
+    CacheModel, ContextMenu, ContextMenuAction, ContextMenuExt, ContextMenuItem, ContextMenuItemExt, GeolocationPermissionRequest,
     HitTestResult, HitTestResultExt, NavigationPolicyDecision, NavigationPolicyDecisionExt, NavigationType,
     NotificationExt as _, NotificationPermissionRequest, PermissionRequest, PermissionRequestExt, PolicyDecisionExt,
-    PolicyDecisionType, URIRequestExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebView, WebViewExt,
+    PolicyDecisionType, SettingsExt, URIRequestExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebContextExt,
+    WebView, WebViewExt,
 };
 
 pub fn place_shell<R: Runtime>(shell: &Webview<R>) -> tauri::Result<()> {
@@ -43,8 +44,26 @@ pub fn attach_service<R: Runtime, E: ServiceEvents>(
         let view = pw.inner();
         layout::place_service(&view);
         view.set_is_muted(muted);
+        trim_caches(&view);
         connect_signals(&view, events);
     })
+}
+
+/// Smaller memory caches than wry leaves, as each profile pays for its own
+/// web processes. The context's default, `WebBrowser`, sizes its memory cache
+/// by the machine's RAM; `DocumentBrowser` keeps a smaller one and the disk
+/// cache (`DocumentViewer` drops that too, so a woken service would fetch
+/// everything again). The context is the profile's, shared by its services:
+/// setting it again is a no-op. wry turns the back/forward cache on, which
+/// keeps whole pages alive after navigating away (login redirects, links
+/// opened in the app); single-page services rarely go back to one.
+fn trim_caches(view: &WebView) {
+    if let Some(context) = view.context() {
+        context.set_cache_model(CacheModel::DocumentBrowser);
+    }
+    if let Some(settings) = WebViewExt::settings(view) {
+        settings.set_enable_page_cache(false);
+    }
 }
 
 pub fn set_muted<R: Runtime>(webview: &Webview<R>, muted: bool) -> tauri::Result<()> {
