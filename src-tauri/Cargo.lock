@@ -3736,6 +3736,7 @@ dependencies = [
  "base64 0.22.1",
  "env_logger",
  "gtk",
+ "libc",
  "log",
  "serde",
  "serde_json",

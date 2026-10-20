@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { BarPosition, IconSize, Service } from "../services/types";
+import { isHibernated } from "./Hibernated";
 
 interface Props {
   services: Service[];
@@ -25,6 +26,8 @@ interface Props {
   audio: boolean;
   /** Open the bell's menu; `anchor` is the bell. */
   onNotificationMenu: (anchor: DOMRect) => void;
+  /** Open the performance panel. */
+  onPerformance: () => void;
   /** Open the settings modal. */
   onSettings: () => void;
 }
@@ -65,6 +68,7 @@ export function Sidebar({
   notifications,
   audio,
   onNotificationMenu,
+  onPerformance,
   onSettings,
 }: Props) {
   const horizontal = position === "top" || position === "bottom";
@@ -137,7 +141,7 @@ export function Sidebar({
         {arrange(services, order).map((s) => (
           <li key={s.id} data-id={s.id} className={s.id === dragging ? "dragged" : undefined}>
             <button
-              className={"service" + (s.shown ? " selected" : "")}
+              className={"service" + (s.shown ? " selected" : "") + (s.enabled && isHibernated(s) ? " asleep" : "")}
               // Not `disabled`: that would swallow the right-click that re-enables it.
               aria-disabled={!s.enabled}
               aria-label={showLabels ? undefined : s.name}
@@ -214,6 +218,12 @@ export function Sidebar({
           </span>
           {showLabels && <span className="name">Notifications</span>}
         </button>
+        <button className="service" onClick={onPerformance} title="Performance" aria-label={showLabels ? undefined : "Performance"}>
+          <span className="service-icon plain">
+            <PulseIcon />
+          </span>
+          {showLabels && <span className="name">Performance</span>}
+        </button>
         <button className="service" onClick={onSettings} title="Settings" aria-label={showLabels ? undefined : "Settings"}>
           <span className="service-icon plain">
             <GearIcon />
@@ -249,6 +259,15 @@ function BellIcon({ off }: { off: boolean }) {
       <path strokeLinejoin="round" d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1.2 1H2.8z" />
       <path strokeLinecap="round" d="M6.6 14a1.5 1.5 0 0 0 2.8 0" />
       {off && <path strokeLinecap="round" d="M2 2l12 12" />}
+    </svg>
+  );
+}
+
+/** A heartbeat line, sized by the surrounding font. */
+function PulseIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M1.5 8.5h3l1.8-4.5 3.2 8.5 1.9-4h3.1" />
     </svg>
   );
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppModal } from "./components/AppModal";
 import { Hibernated, isHibernated } from "./components/Hibernated";
+import { PerformanceModal } from "./components/PerformanceModal";
 import { RecipePicker } from "./components/RecipePicker";
 import { SettingsModal } from "./components/SettingsModal";
 import { showNotificationMenu, showServiceMenu } from "./components/serviceMenu";
@@ -45,7 +46,7 @@ function onColor(color: string): string {
   return luma > 0.6 ? "#16181d" : "#ffffff";
 }
 
-type Modal = Service | "new" | { adding: Recipe } | "settings";
+type Modal = Service | "new" | { adding: Recipe } | "settings" | "performance";
 
 export default function App() {
   const [services, setServices] = useState<Service[]>([]);
@@ -221,6 +222,7 @@ export default function App() {
           notifications={settings?.notifications ?? true}
           audio={settings?.audio ?? true}
           onNotificationMenu={openNotificationMenu}
+          onPerformance={() => openModal("performance")}
           onSettings={() => openModal("settings")}
         />
       )}
@@ -237,6 +239,7 @@ export default function App() {
           onClose={closeModal}
         />
       )}
+      {modal === "performance" && <PerformanceModal services={services} onClose={closeModal} />}
       {modal === "settings" && <SettingsModal settings={settings} onPreview={setSettings} onChange={changeSettings} onClose={closeModal} />}
       {editedRecipe && typeof modal === "object" && modal !== null && "id" in modal && (
         <AppModal

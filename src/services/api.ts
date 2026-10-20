@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { NewService, Recipe, Service, SiteInfo, Settings } from "./types";
+import type { NewService, Performance, Recipe, Service, SiteInfo, Settings } from "./types";
 
 /** Initial snapshot only; later changes arrive via `onServicesChanged`. */
 export const listServices = () => invoke<Service[]>("list_services");
@@ -39,6 +39,8 @@ export const setSettings = (settings: Settings) => invoke<void>("set_settings", 
 export const getAutostart = () => invoke<boolean>("get_autostart");
 export const setAutostart = (enabled: boolean) => invoke<void>("set_autostart", { enabled });
 export const openDevtools = () => invoke<void>("open_devtools");
+/** Memory and CPU use now, overall and by profile; CPU is measured since the previous call. */
+export const getPerformance = () => invoke<Performance>("get_performance");
 
 /** A keyboard shortcut for the shell to carry out (see shortcuts.rs). Resolves to an unlisten fn. */
 export const onShortcut = (cb: (name: "settings") => void) => listen<"settings">("shortcut", (e) => cb(e.payload));

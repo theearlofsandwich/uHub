@@ -152,3 +152,24 @@ export interface CommandError {
   kind: ErrorKind;
   message: string;
 }
+
+/** Mirrors `Usage` in src-tauri/src/performance.rs. */
+export interface Usage {
+  /** PSS in bytes: shared memory split between the processes sharing it. */
+  memory: number;
+  /** Percent of one core since the last sample; null without one. */
+  cpu: number | null;
+}
+
+/** Mirrors `Performance` in src-tauri/src/performance.rs. */
+export interface Performance {
+  /** false: nothing is measured on this platform (only Linux so far). */
+  supported: boolean;
+  total: Usage;
+  /** uHub itself and whatever isn't a profile's. */
+  uhub: Usage;
+  /** By `Service.profile`; one that isn't loaded is missing. */
+  profiles: Record<string, Usage>;
+  /** The machine's RAM in bytes. */
+  systemMemory: number | null;
+}

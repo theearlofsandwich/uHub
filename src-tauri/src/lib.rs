@@ -3,6 +3,7 @@ mod error;
 mod favicon;
 mod lifecycle;
 mod navigation;
+mod performance;
 mod platform;
 mod plugins;
 mod services;
@@ -60,6 +61,7 @@ pub fn run() {
             webviews::get_autostart,
             webviews::set_autostart,
             webviews::open_devtools,
+            performance::get_performance,
         ])
         .on_window_event(|window, event| {
             tray::hide_on_close(window, event);

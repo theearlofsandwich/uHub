@@ -37,6 +37,7 @@ ureq = "3"  # fetching a new app's favicon (favicon.rs); rustls + ring, no syste
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_30"] }  # v2_20: web-process-terminated, v2_30: set_is_muted
+libc = "0.2"  # the Performance panel: clock ticks and netlink sock_diag (performance.rs)
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

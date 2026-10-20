@@ -128,7 +128,7 @@ fn label(id: &str) -> String {
     format!("svc-{id}")
 }
 
-fn profiles_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+pub fn profiles_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     Ok(app.path().app_local_data_dir()?.join("profiles"))
 }
 

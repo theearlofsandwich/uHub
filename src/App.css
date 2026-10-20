@@ -61,6 +61,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .labels .service { padding-right: 12px; }
 .service:hover:not(:disabled, [aria-disabled="true"]) { background: var(--hover); }
 .service:disabled, .service[aria-disabled="true"] { opacity: .45; cursor: default; }
+.service[aria-disabled="true"] .service-icon { filter: grayscale(1); }
+/* Hibernated: just the icon, dimmed; the name, badge and audio mark stay. */
+.service.asleep .service-icon { opacity: .45; }
 .service.selected { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 .service-icon {
   position: relative; flex: none; display: grid; place-items: center;
@@ -273,3 +276,26 @@ kbd {
 .switch:checked { background: var(--accent); }
 .switch:checked::after { transform: translateX(14px); }
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Performance panel (PerformanceModal.tsx). */
+.perf-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px 0 4px; }
+.perf-stat {
+  display: flex; flex-direction: column; gap: 2px; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 8px; background: #101216;
+}
+.perf-stat > span { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.perf-stat strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.perf-stat small { color: var(--muted); font-size: 12px; }
+.row-field.perf-row { justify-content: flex-start; gap: 12px; padding: 8px 0; --icon-size: 24px; }
+.row-field.perf-row > .service-icon { display: grid; }
+.row-field > .perf-name { flex: 1; min-width: 0; }
+.perf-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.row-field > .perf-bar { display: block; flex: none; width: 80px; height: 6px; border-radius: 3px; background: #23262e; overflow: hidden; }
+/* No width transition: the shell covers the window while this is open, so every
+   animation frame repaints and recomposites all of it (~10% CPU while open). */
+.perf-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.row-field > .perf-value { flex: none; width: 4.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.perf-value:last-child { width: 3.5em; color: var(--muted); }
+.perf-row.idle .service-icon, .perf-row.idle .perf-name { opacity: .5; }
+.perf-row.off .service-icon { filter: grayscale(1); }
+.perf-note { margin: 10px 0 8px; color: var(--muted); font-size: 12px; }
